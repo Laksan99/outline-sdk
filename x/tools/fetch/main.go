@@ -29,6 +29,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lmittmann/tint"
@@ -105,6 +106,10 @@ func main() {
 
 	protoFlag := flag.String("proto", "h1", "HTTP version to use (h1, h2, h3)")
 	quicVersionsFlag := flag.String("quic-versions", "", fmt.Sprintf("Ordered QUIC versions for h3 (1, 2, or a comma-separated list) (default %s)", defaultQUICVersions))
+	quicPreludeCountFlag := flag.Int("quic-prelude-count", 0, "Number of same-four-tuple UDP preludes to send before h3 dialing")
+	quicPreludeModeFlag := flag.String("quic-prelude-mode", string(quicPreludeRandom), "Prelude mode: random, quic-v1-invalid, quic-v2-invalid, or valid-v2")
+	quicPreludeSizeFlag := flag.Int("quic-prelude-size", minimumQUICPreludeLength, "Size in bytes for random or QUIC-shaped prelude datagrams")
+	quicPreludeSNIFlag := flag.String("quic-prelude-sni", "www.google.com", "Benign SNI for valid-v2 prelude handshakes")
 	methodFlag := flag.String("method", "GET", "The HTTP method to use")
 	var headersFlag stringArrayFlagValue
 	flag.Var(&headersFlag, "H", "Raw HTTP Header line to add. It must not end in \\r\\n")
@@ -140,6 +145,20 @@ func main() {
 	}
 	if *protoFlag != "h3" && *quicVersionsFlag != "" {
 		slog.Error("-quic-versions requires -proto h3")
+		os.Exit(1)
+	}
+	preludeConfig := quicPreludeConfig{
+		count: *quicPreludeCountFlag,
+		mode:  quicPreludeMode(*quicPreludeModeFlag),
+		size:  *quicPreludeSizeFlag,
+		sni:   *quicPreludeSNIFlag,
+	}
+	if *protoFlag != "h3" && preludeConfig.count != 0 {
+		slog.Error("-quic-prelude-count requires -proto h3")
+		os.Exit(1)
+	}
+	if err := preludeConfig.validate(); err != nil {
+		slog.Error("Invalid QUIC prelude configuration", "error", err)
 		os.Exit(1)
 	}
 
@@ -227,6 +246,8 @@ func main() {
 			Conn: conn,
 		}
 		defer quicTransport.Close()
+		var preludeOnce sync.Once
+		var preludeErr error
 		httpTransport := &http3.Transport{
 			TLSClientConfig: &tlsConfig,
 			Dial: func(ctx context.Context, addr string, tlsConf *tls.Config, quicConf *quic.Config) (quic.EarlyConnection, error) {
@@ -237,6 +258,34 @@ func main() {
 				udpAddr, err := net.ResolveUDPAddr("udp", addressToDial)
 				if err != nil {
 					return nil, err
+				}
+				preludeOnce.Do(func() {
+					if preludeConfig.count == 0 {
+						return
+					}
+					slog.Info("Sending QUIC preludes", "mode", preludeConfig.mode, "count", preludeConfig.count, "destination", udpAddr)
+					if preludeConfig.mode != quicPreludeValidV2 {
+						preludeErr = sendDatagramPreludes(conn, udpAddr, preludeConfig)
+						return
+					}
+					for i := 0; i < preludeConfig.count; i++ {
+						preludeTLS := tlsConf.Clone()
+						preludeTLS.ServerName = preludeConfig.sni
+						preludeQUIC := quicConf.Clone()
+						preludeQUIC.Versions = []quic.Version{quic.Version2}
+						preludeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+						preludeConn, err := quicTransport.DialEarly(preludeCtx, udpAddr, preludeTLS, preludeQUIC)
+						cancel()
+						if preludeConn != nil {
+							_ = preludeConn.CloseWithError(0, "measurement prelude complete")
+						}
+						if err != nil {
+							slog.Debug("Valid-v2 prelude completed with dial error", "attempt", i+1, "error", err)
+						}
+					}
+				})
+				if preludeErr != nil {
+					return nil, preludeErr
 				}
 				quicConf = quicConf.Clone()
 				quicConf.Versions = quicVersions

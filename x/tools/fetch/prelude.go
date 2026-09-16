@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/quic-go/quic-go"
 )
@@ -26,11 +27,17 @@ import (
 type quicPreludeMode string
 
 const (
-	quicPreludeRandom        quicPreludeMode = "random"
-	quicPreludeV1Invalid     quicPreludeMode = "quic-v1-invalid"
-	quicPreludeV2Invalid     quicPreludeMode = "quic-v2-invalid"
-	quicPreludeValidV2       quicPreludeMode = "valid-v2"
-	minimumQUICPreludeLength                 = 1200
+	quicPreludeRandom    quicPreludeMode = "random"
+	quicPreludeV1Invalid quicPreludeMode = "quic-v1-invalid"
+	quicPreludeV2Invalid quicPreludeMode = "quic-v2-invalid"
+	quicPreludeValidV2   quicPreludeMode = "valid-v2"
+	// minimumQUICPreludeLength is the smallest datagram RFC 9000 allows a client
+	// to carry an Initial packet in.
+	minimumQUICPreludeLength = 1200
+	// defaultQUICPreludeLength matches the datagram size QUIC-Go uses for its own
+	// Initials, so a prelude is not distinguishable from the measured connection
+	// by datagram size alone.
+	defaultQUICPreludeLength = 1280
 )
 
 type quicPreludeConfig struct {
@@ -38,6 +45,20 @@ type quicPreludeConfig struct {
 	mode  quicPreludeMode
 	size  int
 	sni   string
+	// attemptTimeout bounds each valid-v2 handshake attempt. It is unused by the
+	// raw datagram modes, which return as soon as the datagrams are written.
+	attemptTimeout time.Duration
+}
+
+// budget reports how long the preludes may take. The preludes run inside the
+// HTTP/3 dial, so the caller must add this to the request timeout; otherwise the
+// preludes consume the budget meant for the measured connection and the request
+// fails before a genuine Initial is ever sent.
+func (c quicPreludeConfig) budget() time.Duration {
+	if c.count <= 0 || c.mode != quicPreludeValidV2 {
+		return 0
+	}
+	return time.Duration(c.count) * c.attemptTimeout
 }
 
 func (c quicPreludeConfig) validate() error {
@@ -59,6 +80,9 @@ func (c quicPreludeConfig) validate() error {
 	case quicPreludeValidV2:
 		if c.sni == "" {
 			return fmt.Errorf("valid-v2 prelude requires a non-empty SNI")
+		}
+		if c.attemptTimeout <= 0 {
+			return fmt.Errorf("valid-v2 prelude attempt timeout must be positive")
 		}
 	default:
 		return fmt.Errorf("unknown QUIC prelude mode %q", c.mode)

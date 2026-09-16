@@ -108,8 +108,9 @@ func main() {
 	quicVersionsFlag := flag.String("quic-versions", "", fmt.Sprintf("Ordered QUIC versions for h3 (1, 2, or a comma-separated list) (default %s)", defaultQUICVersions))
 	quicPreludeCountFlag := flag.Int("quic-prelude-count", 0, "Number of same-four-tuple UDP preludes to send before h3 dialing")
 	quicPreludeModeFlag := flag.String("quic-prelude-mode", string(quicPreludeRandom), "Prelude mode: random, quic-v1-invalid, quic-v2-invalid, or valid-v2")
-	quicPreludeSizeFlag := flag.Int("quic-prelude-size", minimumQUICPreludeLength, "Size in bytes for random or QUIC-shaped prelude datagrams")
+	quicPreludeSizeFlag := flag.Int("quic-prelude-size", defaultQUICPreludeLength, "Size in bytes for random or QUIC-shaped prelude datagrams")
 	quicPreludeSNIFlag := flag.String("quic-prelude-sni", "www.google.com", "Benign SNI for valid-v2 prelude handshakes")
+	quicPreludeTimeoutSecFlag := flag.Int("quic-prelude-timeout", 3, "Timeout in seconds for each valid-v2 prelude handshake attempt")
 	methodFlag := flag.String("method", "GET", "The HTTP method to use")
 	var headersFlag stringArrayFlagValue
 	flag.Var(&headersFlag, "H", "Raw HTTP Header line to add. It must not end in \\r\\n")
@@ -148,10 +149,11 @@ func main() {
 		os.Exit(1)
 	}
 	preludeConfig := quicPreludeConfig{
-		count: *quicPreludeCountFlag,
-		mode:  quicPreludeMode(*quicPreludeModeFlag),
-		size:  *quicPreludeSizeFlag,
-		sni:   *quicPreludeSNIFlag,
+		count:          *quicPreludeCountFlag,
+		mode:           quicPreludeMode(*quicPreludeModeFlag),
+		size:           *quicPreludeSizeFlag,
+		sni:            *quicPreludeSNIFlag,
+		attemptTimeout: time.Duration(*quicPreludeTimeoutSecFlag) * time.Second,
 	}
 	if *protoFlag != "h3" && preludeConfig.count != 0 {
 		slog.Error("-quic-prelude-count requires -proto h3")
@@ -162,8 +164,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The preludes are sent inside the HTTP/3 dial, so extend the client timeout
+	// by their budget to leave -timeout for the connection actually measured.
 	httpClient := &http.Client{
-		Timeout: time.Duration(*timeoutSecFlag) * time.Second,
+		Timeout: time.Duration(*timeoutSecFlag)*time.Second + preludeConfig.budget(),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -273,7 +277,7 @@ func main() {
 						preludeTLS.ServerName = preludeConfig.sni
 						preludeQUIC := quicConf.Clone()
 						preludeQUIC.Versions = []quic.Version{quic.Version2}
-						preludeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+						preludeCtx, cancel := context.WithTimeout(ctx, preludeConfig.attemptTimeout)
 						preludeConn, err := quicTransport.DialEarly(preludeCtx, udpAddr, preludeTLS, preludeQUIC)
 						cancel()
 						if preludeConn != nil {

@@ -92,14 +92,34 @@ func TestQUICPreludeConfigValidate(t *testing.T) {
 		{name: "v1 shaped", config: quicPreludeConfig{count: 1, mode: quicPreludeV1Invalid, size: 1200}},
 		{name: "v2 shaped", config: quicPreludeConfig{count: 1, mode: quicPreludeV2Invalid, size: 1200}},
 		{name: "shaped too short", config: quicPreludeConfig{count: 1, mode: quicPreludeV2Invalid, size: 1199}, wantErr: true},
-		{name: "valid v2", config: quicPreludeConfig{count: 1, mode: quicPreludeValidV2, sni: "www.google.com"}},
-		{name: "valid v2 missing sni", config: quicPreludeConfig{count: 1, mode: quicPreludeValidV2}, wantErr: true},
+		{name: "valid v2", config: quicPreludeConfig{count: 1, mode: quicPreludeValidV2, sni: "www.google.com", attemptTimeout: time.Second}},
+		{name: "valid v2 missing sni", config: quicPreludeConfig{count: 1, mode: quicPreludeValidV2, attemptTimeout: time.Second}, wantErr: true},
+		{name: "valid v2 missing timeout", config: quicPreludeConfig{count: 1, mode: quicPreludeValidV2, sni: "www.google.com"}, wantErr: true},
 		{name: "unknown mode", config: quicPreludeConfig{count: 1, mode: "unknown", size: 1200}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := tt.config.validate(); (err != nil) != tt.wantErr {
 				t.Fatalf("validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestQUICPreludeConfigBudget(t *testing.T) {
+	tests := []struct {
+		name   string
+		config quicPreludeConfig
+		want   time.Duration
+	}{
+		{name: "disabled", config: quicPreludeConfig{count: 0, mode: quicPreludeValidV2, attemptTimeout: 3 * time.Second}},
+		{name: "raw modes are immediate", config: quicPreludeConfig{count: 4, mode: quicPreludeV2Invalid, size: 1200, attemptTimeout: 3 * time.Second}},
+		{name: "valid v2 reserves every attempt", config: quicPreludeConfig{count: 2, mode: quicPreludeValidV2, sni: "www.google.com", attemptTimeout: 3 * time.Second}, want: 6 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.config.budget(); got != tt.want {
+				t.Fatalf("budget() = %v, want %v", got, tt.want)
 			}
 		})
 	}

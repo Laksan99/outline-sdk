@@ -28,6 +28,7 @@ import (
 	"net/textproto"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -107,7 +108,8 @@ func main() {
 	protoFlag := flag.String("proto", "h1", "HTTP version to use (h1, h2, h3)")
 	quicVersionsFlag := flag.String("quic-versions", "", fmt.Sprintf("Ordered QUIC versions for h3 (1, 2, or a comma-separated list) (default %s)", defaultQUICVersions))
 	quicPreludeCountFlag := flag.Int("quic-prelude-count", 0, "Number of same-four-tuple UDP preludes to send before h3 dialing")
-	quicPreludeModeFlag := flag.String("quic-prelude-mode", string(quicPreludeRandom), "Prelude mode: random, quic-v1-invalid, quic-v2-invalid, or valid-v2")
+	quicPreludeModeFlag := flag.String("quic-prelude-mode", string(quicPreludeRandom), "Prelude mode: random, quic-v1-invalid, quic-v2-invalid, quic-version-invalid, or valid-v2")
+	quicPreludeVersionFlag := flag.String("quic-prelude-version", "", "Wire codepoint for quic-version-invalid preludes, e.g. 0x1a2a3a4a")
 	quicPreludeSizeFlag := flag.Int("quic-prelude-size", defaultQUICPreludeLength, "Size in bytes for random or QUIC-shaped prelude datagrams")
 	quicPreludeSNIFlag := flag.String("quic-prelude-sni", "www.google.com", "Benign SNI for valid-v2 prelude handshakes")
 	quicPreludeTimeoutSecFlag := flag.Int("quic-prelude-timeout", 3, "Timeout in seconds for each valid-v2 prelude handshake attempt")
@@ -154,6 +156,14 @@ func main() {
 		size:           *quicPreludeSizeFlag,
 		sni:            *quicPreludeSNIFlag,
 		attemptTimeout: time.Duration(*quicPreludeTimeoutSecFlag) * time.Second,
+	}
+	if *quicPreludeVersionFlag != "" {
+		v, err := strconv.ParseUint(strings.TrimPrefix(strings.TrimPrefix(*quicPreludeVersionFlag, "0x"), "0X"), 16, 32)
+		if err != nil {
+			slog.Error("Invalid QUIC prelude version", "value", *quicPreludeVersionFlag, "error", err)
+			os.Exit(1)
+		}
+		preludeConfig.version = uint32(v)
 	}
 	if *protoFlag != "h3" && preludeConfig.count != 0 {
 		slog.Error("-quic-prelude-count requires -proto h3")

@@ -27,10 +27,11 @@ import (
 type quicPreludeMode string
 
 const (
-	quicPreludeRandom    quicPreludeMode = "random"
-	quicPreludeV1Invalid quicPreludeMode = "quic-v1-invalid"
-	quicPreludeV2Invalid quicPreludeMode = "quic-v2-invalid"
-	quicPreludeValidV2   quicPreludeMode = "valid-v2"
+	quicPreludeRandom     quicPreludeMode = "random"
+	quicPreludeV1Invalid  quicPreludeMode = "quic-v1-invalid"
+	quicPreludeV2Invalid  quicPreludeMode = "quic-v2-invalid"
+	quicPreludeVerInvalid quicPreludeMode = "quic-version-invalid"
+	quicPreludeValidV2    quicPreludeMode = "valid-v2"
 	// minimumQUICPreludeLength is the smallest datagram RFC 9000 allows a client
 	// to carry an Initial packet in.
 	minimumQUICPreludeLength = 1200
@@ -45,6 +46,11 @@ type quicPreludeConfig struct {
 	mode  quicPreludeMode
 	size  int
 	sni   string
+	// version is the wire codepoint used by the quic-version-invalid mode. It may
+	// be any 32-bit value, including versions no implementation supports, which
+	// lets a measurement distinguish recognition of a specific version from
+	// recognition of the version-invariant long-header structure.
+	version uint32
 	// attemptTimeout bounds each valid-v2 handshake attempt. It is unused by the
 	// raw datagram modes, which return as soon as the datagrams are written.
 	attemptTimeout time.Duration
@@ -73,9 +79,12 @@ func (c quicPreludeConfig) validate() error {
 		if c.size <= 0 {
 			return fmt.Errorf("random prelude size must be positive")
 		}
-	case quicPreludeV1Invalid, quicPreludeV2Invalid:
+	case quicPreludeV1Invalid, quicPreludeV2Invalid, quicPreludeVerInvalid:
 		if c.size < minimumQUICPreludeLength {
 			return fmt.Errorf("QUIC-shaped prelude size must be at least %d bytes", minimumQUICPreludeLength)
+		}
+		if c.mode == quicPreludeVerInvalid && c.version == 0 {
+			return fmt.Errorf("quic-version-invalid prelude requires a non-zero version (0 means Version Negotiation)")
 		}
 	case quicPreludeValidV2:
 		if c.sni == "" {
@@ -103,6 +112,20 @@ func randomDatagram(size int) ([]byte, error) {
 // useful for distinguishing recognition of the invariant/long-header structure
 // from successful Initial decryption. It is not a valid QUIC packet.
 func quicShapedInvalidInitial(version quic.Version, size int) ([]byte, error) {
+	// Known versions carry their own Initial type encoding; anything else is
+	// treated as an unknown version, where RFC 8999 defines only the header form
+	// and the version field, so the remaining bits are left as the v1 layout.
+	typeBits := byte(0xc0)
+	switch version {
+	case quic.Version1:
+		typeBits = 0xc0
+	case quic.Version2:
+		typeBits = 0xd0
+	}
+	return quicShapedInvalidInitialWithBits(uint32(version), typeBits, size)
+}
+
+func quicShapedInvalidInitialWithBits(version uint32, typeBits byte, size int) ([]byte, error) {
 	if size < minimumQUICPreludeLength {
 		return nil, fmt.Errorf("QUIC-shaped prelude size must be at least %d bytes", minimumQUICPreludeLength)
 	}
@@ -115,15 +138,8 @@ func quicShapedInvalidInitial(version quic.Version, size int) ([]byte, error) {
 	// QUIC v2 encodes Initial as type 0b01. The protected low nibble and packet
 	// number bytes remain random, mimicking header protection without producing a
 	// valid AEAD tag.
-	switch version {
-	case quic.Version1:
-		p[0] = 0xc0 | (p[0] & 0x0f)
-	case quic.Version2:
-		p[0] = 0xd0 | (p[0] & 0x0f)
-	default:
-		return nil, fmt.Errorf("unsupported QUIC prelude version %v", version)
-	}
-	binary.BigEndian.PutUint32(p[1:5], uint32(version))
+	p[0] = typeBits | (p[0] & 0x0f)
+	binary.BigEndian.PutUint32(p[1:5], version)
 
 	const connectionIDLength = 8
 	p[5] = connectionIDLength
@@ -154,6 +170,8 @@ func sendDatagramPreludes(conn net.PacketConn, addr net.Addr, config quicPrelude
 			payload, err = quicShapedInvalidInitial(quic.Version1, config.size)
 		case quicPreludeV2Invalid:
 			payload, err = quicShapedInvalidInitial(quic.Version2, config.size)
+		case quicPreludeVerInvalid:
+			payload, err = quicShapedInvalidInitialWithBits(config.version, 0xc0, config.size)
 		default:
 			return fmt.Errorf("prelude mode %q does not produce raw datagrams", config.mode)
 		}

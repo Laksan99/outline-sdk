@@ -13,30 +13,30 @@ The tool logs the negotiated QUIC version and wire codepoint after a successful
 HTTP/3 request. Use `1,2` (the default) to prefer v1, or `2,1` to prefer v2
 while allowing fallback through version negotiation.
 
-### QUIC prelude measurements
+### QUIC preludes
 
-For controlled network measurements, `-quic-prelude-count` sends traffic to
-the selected server on the same UDP socket before the HTTP/3 connection. The
-available `-quic-prelude-mode` values are:
-
-- `random`: opaque random datagrams;
-- `quic-v1-invalid`: QUIC v1 Initial-shaped datagrams with invalid
-  authenticated encryption, sized by `-quic-prelude-size` (default 1280 bytes,
-  matching QUIC-Go's own Initials; the RFC 9000 minimum of 1200 is enforced);
-- `quic-v2-invalid`: the equivalent QUIC v2 Initial-shaped datagrams; and
-- `valid-v2`: genuine QUIC v2 handshake attempts using the SNI selected by
-  `-quic-prelude-sni` (default `www.google.com`).
-
-For the raw modes, the count is the exact number of datagrams. For `valid-v2`,
-the count is the number of handshake attempts, each of which may produce more
-than one datagram, and `-quic-prelude-timeout` (default 3 seconds) bounds each
-attempt. Because the preludes are sent inside the HTTP/3 dial, their total
-budget is added to `-timeout`, so the measured connection still gets the full
-`-timeout` it would have had without preludes. For example:
+Preludes are configured through `-transport`, not through dedicated flags, so
+they compose with the rest of the transport stack. The `quicprelude` type sends
+datagrams to each destination before the first real packet, on the same socket
+and therefore the same four-tuple:
 
 ```console
-fetch -proto h3 -quic-versions 2 -quic-prelude-count 2 \
-  -quic-prelude-mode quic-v2-invalid -method HEAD -v https://example.com/
+fetch -proto h3 -quic-versions 1 -method HEAD -v \
+  -transport 'quicprelude:count=1&version=0x1a2a3a4a' https://example.com/
+```
+
+Options, all optional: `count` (default 1), `mode` (`invalid-initial`, the
+default, or `random`), `length` (default 1280) and `version` (default
+`0x1a2a3a4a`, a reserved codepoint; also accepts `v1`, `v2`, or any hex
+codepoint).
+
+Because it is an ordinary transport, it stacks above a proxy, and the prelude
+then travels the same path as the traffic it precedes:
+
+```console
+fetch -proto h3 -quic-versions 1 -method HEAD -v \
+  -transport 'socks5://user:pass@proxy.example:1080|quicprelude:count=1' \
+  https://example.com/
 ```
 
 These options are intended for authorized measurement of path and middlebox

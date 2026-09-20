@@ -134,6 +134,19 @@ For more details, refer to [golang.getoutline.org/sdk/transport/tlsfrag].
 
 	tlsfrag:[LENGTH]
 
+QUIC prelude (packet listeners only, package [golang.getoutline.org/sdk/x/quicprelude])
+
+Sends datagrams to each destination before the first real packet, on the same
+socket and therefore the same four-tuple. A middlebox that reads the TLS Server
+Name Indication from the first QUIC Initial it can parse on a flow, and caches
+that verdict for the flow, finds no name in an Initial it cannot decrypt.
+
+	quicprelude:count=[COUNT]&mode=[MODE]&length=[LENGTH]&version=[VERSION]
+
+All options may be omitted. count defaults to 1, mode to invalid-initial (the
+alternative is random), length to 1280 bytes, and version to 0x1a2a3a4a, a
+reserved codepoint. version also accepts v1, v2, or any 32-bit hex codepoint.
+
 Packet reordering (streams only, package [golang.getoutline.org/sdk/x/disorder])
 
 The disorder strategy sends TCP packets out of order by manipulating the

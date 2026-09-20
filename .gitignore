@@ -27,3 +27,11 @@ output-metadata.json
 # Tasks
 .task
 out
+
+# Binaries built in place by `go build ./tools/<name>`, which lands the
+# executable in the module root rather than the package directory.
+/x/fetch
+/x/fetch-speed
+/x/resolve
+/x/test-connectivity
+/x/http2transport

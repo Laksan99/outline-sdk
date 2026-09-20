@@ -18,89 +18,111 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"golang.getoutline.org/sdk/x/quicprelude"
 )
 
+// parsePreludeOptions parses the options of a quicprelude config.
+func parsePreludeOptions(t *testing.T, options string) (quicprelude.Config, error) {
+	t.Helper()
+	config, err := ParseConfig("quicprelude:" + options)
+	require.NoError(t, err)
+	return newQUICPreludeConfigFromURL(config.URL)
+}
+
 func TestRegisterQUICPreludePacketListener(t *testing.T) {
 	providers := NewDefaultProviders()
+
 	pl, err := providers.NewPacketListener(context.Background(), "quicprelude:count=2&version=0x1a2a3a4a")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := pl.(*quicprelude.PacketListener); !ok {
-		t.Fatalf("got %T, want a *quicprelude.PacketListener", pl)
-	}
-}
+	require.NoError(t, err)
+	require.IsType(t, &quicprelude.PacketListener{}, pl)
 
-func TestQUICPreludeConfigFromURL(t *testing.T) {
-	tests := []struct {
-		name    string
-		options string
-		want    quicprelude.Config
-		wantErr bool
-	}{
-		{
-			name:    "defaults",
-			options: "",
-			want:    quicprelude.NewConfig(),
-		},
-		{
-			name:    "all options",
-			options: "count=3&mode=random&length=1200",
-			want:    quicprelude.Config{Count: 3, Mode: quicprelude.ModeRandom, Length: 1200, Version: quicprelude.DefaultVersion},
-		},
-		{
-			name:    "hex version",
-			options: "version=0xdeadbeef",
-			want:    quicprelude.Config{Count: 1, Mode: quicprelude.ModeInvalidInitial, Length: quicprelude.DefaultLength, Version: 0xdeadbeef},
-		},
-		{
-			name:    "hex version without prefix",
-			options: "version=1a2a3a4a",
-			want:    quicprelude.Config{Count: 1, Mode: quicprelude.ModeInvalidInitial, Length: quicprelude.DefaultLength, Version: 0x1a2a3a4a},
-		},
-		{
-			name:    "version by name",
-			options: "version=v2",
-			want:    quicprelude.Config{Count: 1, Mode: quicprelude.ModeInvalidInitial, Length: quicprelude.DefaultLength, Version: quicprelude.Version2},
-		},
-		{name: "unknown option", options: "colour=blue", wantErr: true},
-		{name: "repeated option", options: "count=1&count=2", wantErr: true},
-		{name: "non-numeric count", options: "count=many", wantErr: true},
-		{name: "non-numeric length", options: "length=big", wantErr: true},
-		{name: "bad version", options: "version=zzz", wantErr: true},
-		{name: "zero version", options: "version=0x0", wantErr: true},
-		{name: "unknown mode", options: "mode=handshake", wantErr: true},
-		{name: "undersized initial", options: "length=100", wantErr: true},
-		{name: "negative count", options: "count=-1", wantErr: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			config, err := ParseConfig("quicprelude:" + tt.options)
-			if err != nil {
-				t.Fatal(err)
-			}
-			got, err := newQUICPreludeConfigFromURL(config.URL)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if tt.wantErr {
-				return
-			}
-			if got != tt.want {
-				t.Errorf("config = %+v, want %+v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestQUICPreludeWrapsBaseListener(t *testing.T) {
-	providers := NewDefaultProviders()
-	// The prelude must be able to sit above another packet listener, which is
-	// how it shares a four-tuple with proxied traffic.
-	_, err := providers.NewPacketListener(context.Background(),
+	// The prelude must sit above another packet listener, which is how it shares
+	// a four-tuple with proxied traffic.
+	_, err = providers.NewPacketListener(context.Background(),
 		"ss://ChaCha20-IETF-Poly1305:password@example.com:1234|quicprelude:count=1")
-	if err != nil {
-		t.Fatalf("failed to build a prelude over a base listener: %v", err)
-	}
+	require.NoError(t, err)
+}
+
+func TestQUICPreludeOptionsDefault(t *testing.T) {
+	config, err := parsePreludeOptions(t, "")
+	require.NoError(t, err)
+	require.Equal(t, quicprelude.NewConfig(), config)
+}
+
+func TestQUICPreludeOptionCount(t *testing.T) {
+	config, err := parsePreludeOptions(t, "count=3")
+	require.NoError(t, err)
+	require.Equal(t, 3, config.Count)
+
+	// Zero disables the prelude, and the other options stop mattering.
+	config, err = parsePreludeOptions(t, "count=0")
+	require.NoError(t, err)
+	require.Equal(t, 0, config.Count)
+
+	_, err = parsePreludeOptions(t, "count=-1")
+	require.Error(t, err)
+
+	_, err = parsePreludeOptions(t, "count=many")
+	require.Error(t, err)
+}
+
+func TestQUICPreludeOptionMode(t *testing.T) {
+	config, err := parsePreludeOptions(t, "mode=random&length=1200")
+	require.NoError(t, err)
+	require.Equal(t, quicprelude.ModeRandom, config.Mode)
+
+	config, err = parsePreludeOptions(t, "mode=invalid-initial")
+	require.NoError(t, err)
+	require.Equal(t, quicprelude.ModeInvalidInitial, config.Mode)
+
+	_, err = parsePreludeOptions(t, "mode=handshake")
+	require.Error(t, err)
+}
+
+func TestQUICPreludeOptionLength(t *testing.T) {
+	config, err := parsePreludeOptions(t, "length=1300")
+	require.NoError(t, err)
+	require.Equal(t, 1300, config.Length)
+
+	// An Initial-shaped datagram has an RFC 9000 minimum size.
+	_, err = parsePreludeOptions(t, "length=100")
+	require.Error(t, err)
+
+	_, err = parsePreludeOptions(t, "length=big")
+	require.Error(t, err)
+}
+
+func TestQUICPreludeOptionVersion(t *testing.T) {
+	config, err := parsePreludeOptions(t, "version=0xdeadbeef")
+	require.NoError(t, err)
+	require.Equal(t, uint32(0xdeadbeef), config.Version)
+
+	// The 0x prefix is optional.
+	config, err = parsePreludeOptions(t, "version=1a2a3a4a")
+	require.NoError(t, err)
+	require.Equal(t, uint32(0x1a2a3a4a), config.Version)
+
+	config, err = parsePreludeOptions(t, "version=v1")
+	require.NoError(t, err)
+	require.Equal(t, quicprelude.Version1, config.Version)
+
+	config, err = parsePreludeOptions(t, "version=v2")
+	require.NoError(t, err)
+	require.Equal(t, quicprelude.Version2, config.Version)
+
+	// Version zero denotes Version Negotiation and is not a prelude version.
+	_, err = parsePreludeOptions(t, "version=0x0")
+	require.Error(t, err)
+
+	_, err = parsePreludeOptions(t, "version=zzz")
+	require.Error(t, err)
+}
+
+func TestQUICPreludeRejectsUnknownAndRepeatedOptions(t *testing.T) {
+	_, err := parsePreludeOptions(t, "colour=blue")
+	require.Error(t, err)
+
+	_, err = parsePreludeOptions(t, "count=1&count=2")
+	require.Error(t, err)
 }

@@ -22,15 +22,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"golang.getoutline.org/sdk/transport"
 )
 
+var _ transport.PacketListener = (*PacketListener)(nil)
+
+// recordingConn records what was written, so a test can assert on the order and
+// shape of the datagrams that reached the wire.
 type recordingConn struct {
 	mu       sync.Mutex
 	writes   [][]byte
 	addrs    []string
 	writeErr error
-	closed   bool
 }
 
 func (c *recordingConn) ReadFrom([]byte) (int, net.Addr, error) {
@@ -48,7 +52,7 @@ func (c *recordingConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	return len(p), nil
 }
 
-func (c *recordingConn) Close() error                   { c.closed = true; return nil }
+func (*recordingConn) Close() error                     { return nil }
 func (*recordingConn) LocalAddr() net.Addr              { return &net.UDPAddr{} }
 func (*recordingConn) SetDeadline(time.Time) error      { return nil }
 func (*recordingConn) SetReadDeadline(time.Time) error  { return nil }
@@ -60,195 +64,161 @@ func (c *recordingConn) snapshot() ([][]byte, []string) {
 	return c.writes, c.addrs
 }
 
+func (c *recordingConn) setWriteErr(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writeErr = err
+}
+
+// countPreludes counts datagrams of the configured prelude length.
+func (c *recordingConn) countPreludes(length int) int {
+	writes, _ := c.snapshot()
+	n := 0
+	for _, w := range writes {
+		if len(w) == length {
+			n++
+		}
+	}
+	return n
+}
+
 type fixedListener struct {
 	conn net.PacketConn
-	err  error
 }
 
 func (l *fixedListener) ListenPacket(context.Context) (net.PacketConn, error) {
-	return l.conn, l.err
-}
-
-func addr(t *testing.T, s string) net.Addr {
-	t.Helper()
-	a, err := net.ResolveUDPAddr("udp", s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return a
+	return l.conn, nil
 }
 
 func newTestConn(t *testing.T, config Config) (net.PacketConn, *recordingConn) {
 	t.Helper()
 	inner := &recordingConn{}
-	l := &PacketListener{Inner: &fixedListener{conn: inner}, Config: config}
-	conn, err := l.ListenPacket(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	listener := &PacketListener{Inner: &fixedListener{conn: inner}, Config: config}
+	conn, err := listener.ListenPacket(context.Background())
+	require.NoError(t, err)
 	return conn, inner
 }
 
+func udpAddr(t *testing.T, address string) net.Addr {
+	t.Helper()
+	addr, err := net.ResolveUDPAddr("udp", address)
+	require.NoError(t, err)
+	return addr
+}
+
 func TestPreludePrecedesFirstWrite(t *testing.T) {
-	config := Config{Count: 3, Mode: ModeInvalidInitial, Length: 1280, Version: DefaultVersion}
-	conn, inner := newTestConn(t, config)
+	conn, inner := newTestConn(t, Config{Count: 3, Mode: ModeInvalidInitial, Length: 1280, Version: DefaultVersion})
 
 	payload := []byte("real traffic")
-	if _, err := conn.WriteTo(payload, addr(t, "192.0.2.1:443")); err != nil {
-		t.Fatal(err)
-	}
+	_, err := conn.WriteTo(payload, udpAddr(t, "192.0.2.1:443"))
+	require.NoError(t, err)
 
 	writes, addrs := inner.snapshot()
-	if len(writes) != 4 {
-		t.Fatalf("wrote %d datagrams, want 3 preludes plus the payload", len(writes))
+	require.Len(t, writes, 4, "expected 3 preludes followed by the payload")
+	for i := range 3 {
+		require.Len(t, writes[i], 1280, "prelude %d", i+1)
+		require.Equal(t, byte(0xc0), writes[i][0]&0xc0, "prelude %d is not long-header shaped", i+1)
+		require.Equal(t, "192.0.2.1:443", addrs[i], "prelude %d destination", i+1)
 	}
-	for i := 0; i < 3; i++ {
-		if len(writes[i]) != 1280 {
-			t.Errorf("prelude %d length = %d, want 1280", i+1, len(writes[i]))
-		}
-		if writes[i][0]&0xc0 != 0xc0 {
-			t.Errorf("prelude %d is not long-header shaped", i+1)
-		}
-		if addrs[i] != "192.0.2.1:443" {
-			t.Errorf("prelude %d went to %s", i+1, addrs[i])
-		}
-	}
-	if string(writes[3]) != string(payload) {
-		t.Errorf("last write = %q, want the payload; the prelude must come first", writes[3])
-	}
+	// The ordering is the whole point: the prelude has to reach the wire first.
+	require.Equal(t, payload, writes[3])
 }
 
 func TestPreludeSentOncePerDestination(t *testing.T) {
 	conn, inner := newTestConn(t, NewConfig())
-	dst := addr(t, "192.0.2.1:443")
+	destination := udpAddr(t, "192.0.2.1:443")
 
-	for i := 0; i < 5; i++ {
-		if _, err := conn.WriteTo([]byte("x"), dst); err != nil {
-			t.Fatal(err)
-		}
+	for range 5 {
+		_, err := conn.WriteTo([]byte("x"), destination)
+		require.NoError(t, err)
 	}
 
 	writes, _ := inner.snapshot()
-	// One prelude, then five payloads.
-	if len(writes) != 6 {
-		t.Fatalf("wrote %d datagrams, want 1 prelude plus 5 payloads", len(writes))
-	}
-	for _, w := range writes[1:] {
-		if len(w) != 1 {
-			t.Errorf("unexpected extra prelude after the first write: length %d", len(w))
-		}
-	}
+	require.Len(t, writes, 6, "expected 1 prelude followed by 5 payloads")
+	require.Equal(t, 1, inner.countPreludes(DefaultLength))
 }
 
-func TestPreludeSentPerDestination(t *testing.T) {
+func TestPreludeSentForEachDestination(t *testing.T) {
 	conn, inner := newTestConn(t, NewConfig())
 
-	for _, host := range []string{"192.0.2.1:443", "192.0.2.2:443", "192.0.2.1:443"} {
-		if _, err := conn.WriteTo([]byte("x"), addr(t, host)); err != nil {
-			t.Fatal(err)
-		}
+	// The third write repeats the first destination and must not prelude again.
+	for _, address := range []string{"192.0.2.1:443", "192.0.2.2:443", "192.0.2.1:443"} {
+		_, err := conn.WriteTo([]byte("x"), udpAddr(t, address))
+		require.NoError(t, err)
 	}
 
 	writes, addrs := inner.snapshot()
-	// Prelude+payload for .1, prelude+payload for .2, payload only for .1 again.
-	if len(writes) != 5 {
-		t.Fatalf("wrote %d datagrams, want 5", len(writes))
-	}
+	require.Len(t, writes, 5, "expected a prelude for each of 2 destinations plus 3 payloads")
+
 	preludesPerAddr := map[string]int{}
 	for i, w := range writes {
 		if len(w) == DefaultLength {
 			preludesPerAddr[addrs[i]]++
 		}
 	}
-	for _, host := range []string{"192.0.2.1:443", "192.0.2.2:443"} {
-		if preludesPerAddr[host] != 1 {
-			t.Errorf("destination %s got %d preludes, want 1", host, preludesPerAddr[host])
-		}
-	}
+	require.Equal(t, 1, preludesPerAddr["192.0.2.1:443"])
+	require.Equal(t, 1, preludesPerAddr["192.0.2.2:443"])
 }
 
 func TestPreludeRetriedAfterWriteFailure(t *testing.T) {
-	inner := &recordingConn{writeErr: errors.New("network down")}
-	l := &PacketListener{Inner: &fixedListener{conn: inner}, Config: NewConfig()}
-	conn, err := l.ListenPacket(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	dst := addr(t, "192.0.2.1:443")
+	conn, inner := newTestConn(t, NewConfig())
+	destination := udpAddr(t, "192.0.2.1:443")
+	inner.setWriteErr(errors.New("network down"))
 
-	if _, err := conn.WriteTo([]byte("x"), dst); err == nil {
-		t.Fatal("expected the write to fail while the prelude cannot be sent")
-	}
+	_, err := conn.WriteTo([]byte("x"), destination)
+	require.Error(t, err)
 
-	// The destination must not be recorded as done, so a later write retries.
-	inner.mu.Lock()
-	inner.writeErr = nil
-	inner.mu.Unlock()
+	// The destination must not be recorded as done while the prelude failed,
+	// otherwise the real traffic would later go out with no prelude at all.
+	inner.setWriteErr(nil)
+	_, err = conn.WriteTo([]byte("x"), destination)
+	require.NoError(t, err)
 
-	if _, err := conn.WriteTo([]byte("x"), dst); err != nil {
-		t.Fatal(err)
-	}
 	writes, _ := inner.snapshot()
-	if len(writes) != 2 {
-		t.Fatalf("wrote %d datagrams, want the prelude to be retried then the payload", len(writes))
-	}
+	require.Len(t, writes, 2, "expected the prelude to be retried, then the payload")
+	require.Len(t, writes[0], DefaultLength)
 }
 
 func TestZeroCountReturnsInnerConnUnwrapped(t *testing.T) {
 	inner := &recordingConn{}
-	l := &PacketListener{Inner: &fixedListener{conn: inner}, Config: Config{Count: 0}}
-	conn, err := l.ListenPacket(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if conn != net.PacketConn(inner) {
-		t.Error("a disabled prelude should hand back the inner connection unwrapped")
-	}
+	listener := &PacketListener{Inner: &fixedListener{conn: inner}, Config: Config{Count: 0}}
+
+	conn, err := listener.ListenPacket(context.Background())
+	require.NoError(t, err)
+	require.Same(t, inner, conn, "a disabled prelude should not wrap the connection")
 }
 
-func TestListenPacketRejectsBadConfig(t *testing.T) {
-	l := &PacketListener{
+func TestListenPacketRejectsInvalidConfig(t *testing.T) {
+	listener := &PacketListener{
 		Inner:  &fixedListener{conn: &recordingConn{}},
 		Config: Config{Count: 1, Mode: ModeInvalidInitial, Length: 10},
 	}
-	if _, err := l.ListenPacket(context.Background()); err == nil {
-		t.Error("expected ListenPacket to reject an invalid config")
-	}
+
+	_, err := listener.ListenPacket(context.Background())
+	require.Error(t, err)
 }
 
-func TestListenPacketRequiresInner(t *testing.T) {
-	l := &PacketListener{Config: NewConfig()}
-	if _, err := l.ListenPacket(context.Background()); err == nil {
-		t.Error("expected ListenPacket to require an inner listener")
-	}
+func TestListenPacketRequiresInnerListener(t *testing.T) {
+	listener := &PacketListener{Config: NewConfig()}
+
+	_, err := listener.ListenPacket(context.Background())
+	require.Error(t, err)
 }
 
 func TestConcurrentWritesSendOnePrelude(t *testing.T) {
 	conn, inner := newTestConn(t, NewConfig())
-	dst := addr(t, "192.0.2.1:443")
+	destination := udpAddr(t, "192.0.2.1:443")
 
 	var wg sync.WaitGroup
-	for i := 0; i < 16; i++ {
+	for range 16 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := conn.WriteTo([]byte("x"), dst); err != nil {
-				t.Error(err)
-			}
+			_, err := conn.WriteTo([]byte("x"), destination)
+			require.NoError(t, err)
 		}()
 	}
 	wg.Wait()
 
-	writes, _ := inner.snapshot()
-	preludes := 0
-	for _, w := range writes {
-		if len(w) == DefaultLength {
-			preludes++
-		}
-	}
-	if preludes != 1 {
-		t.Errorf("sent %d preludes across concurrent writes, want exactly 1", preludes)
-	}
+	require.Equal(t, 1, inner.countPreludes(DefaultLength), "racing writes must not each send a prelude")
 }
-
-var _ transport.PacketListener = (*PacketListener)(nil)

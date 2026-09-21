@@ -143,11 +143,21 @@ that verdict for the flow, finds no name in an Initial it cannot decrypt.
 
 	quicprelude:count=[COUNT]&mode=[MODE]&length=[LENGTH]&version=[VERSION]
 
-All options may be omitted. count defaults to 1, mode to invalid-initial (the
-alternative is random), and version to 0x1a2a3a4a, a reserved codepoint that
-also accepts v1, v2, or any 32-bit hex value. length defaults to matching the
-packet the prelude precedes, so it is not separable by size; set it to size
-every datagram the same instead. A count of 0 disables the prelude.
+Every option may be omitted, and the defaults are the ones to reach for first:
+one Initial-shaped datagram carrying a reserved version codepoint, sized to
+match the packet it precedes.
+
+	count    number of datagrams; 0 disables the prelude (default 1)
+	mode     invalid-initial or random (default invalid-initial)
+	length   match, or a byte count (default match)
+	version  a 32-bit hex codepoint, v1, or v2 (default 0x1a2a3a4a)
+
+length=match sizes each datagram like the packet it precedes, so the prelude is
+not separable from it by size. A packet too short to carry an Initial falls back
+to a valid length.
+
+version defaults to a reserved codepoint that no implementation speaks, which
+filtering that enumerates known versions has no reason to list.
 
 Packet reordering (streams only, package [golang.getoutline.org/sdk/x/disorder])
 

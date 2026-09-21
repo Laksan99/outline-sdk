@@ -195,8 +195,8 @@ func TestDecliningGeneratorSendsNothingAndKeepsAsking(t *testing.T) {
 	// an unrelated datagram, such as a DNS query, going to the same destination
 	// first.
 	conn, inner := newTestConn(t, NewConfig().WithGenerator(
-		func(packet []byte, _ net.Addr) ([][]byte, error) {
-			if len(packet) == 0 || packet[0]&0x80 == 0 {
+		func(input GeneratorInput) ([][]byte, error) {
+			if len(input.Packet) == 0 || input.Packet[0]&0x80 == 0 {
 				return nil, nil
 			}
 			return [][]byte{[]byte("prelude")}, nil
@@ -249,9 +249,9 @@ func TestGeneratorReceivesDestinationAndErrorsPropagate(t *testing.T) {
 	var gotDst net.Addr
 	var gotPacket []byte
 	listener, err := NewConfig().
-		WithGenerator(func(packet []byte, dst net.Addr) ([][]byte, error) {
-			gotDst = dst
-			gotPacket = append([]byte(nil), packet...)
+		WithGenerator(func(input GeneratorInput) ([][]byte, error) {
+			gotDst = input.Destination
+			gotPacket = append([]byte(nil), input.Packet...)
 			return [][]byte{[]byte("custom prelude")}, nil
 		}).
 		NewPacketListener(&fixedListener{conn: inner})
@@ -271,7 +271,7 @@ func TestGeneratorReceivesDestinationAndErrorsPropagate(t *testing.T) {
 
 	// A generator that fails aborts the write rather than sending unpreluded.
 	failing, err := NewConfig().
-		WithGenerator(func([]byte, net.Addr) ([][]byte, error) { return nil, errors.New("no datagram") }).
+		WithGenerator(func(GeneratorInput) ([][]byte, error) { return nil, errors.New("no datagram") }).
 		NewPacketListener(&fixedListener{conn: &recordingConn{}})
 	require.NoError(t, err)
 	conn, err = failing.ListenPacket(context.Background())

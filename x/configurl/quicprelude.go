@@ -73,8 +73,8 @@ func newQUICPreludeConfigFromURL(configURL url.URL) (*quicprelude.Config, error)
 		case "mode":
 			options.mode = strings.ToLower(value)
 		case "length":
-			if options.length, err = strconv.Atoi(value); err != nil {
-				return nil, fmt.Errorf("invalid length %q: %w", value, err)
+			if options.length, err = parseQUICPreludeLength(value); err != nil {
+				return nil, err
 			}
 		case "version":
 			if options.version, err = parseQUICVersionCodepoint(value); err != nil {
@@ -106,6 +106,22 @@ func newQUICPreludeGenerator(options quicPreludeOptions) (quicprelude.Generator,
 	default:
 		return nil, fmt.Errorf("unknown mode %q, want invalid-initial or random", options.mode)
 	}
+}
+
+// parseQUICPreludeLength accepts "match", the default, which sizes each
+// datagram to the packet it precedes, or a byte count.
+func parseQUICPreludeLength(value string) (int, error) {
+	if strings.EqualFold(value, "match") {
+		return quicprelude.MatchPacketLength, nil
+	}
+	length, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid length %q: want \"match\" or a byte count", value)
+	}
+	if length <= 0 {
+		return 0, fmt.Errorf("invalid length %d: want \"match\" or a positive byte count", length)
+	}
+	return length, nil
 }
 
 // parseQUICVersionCodepoint accepts a 32-bit wire codepoint, in hexadecimal

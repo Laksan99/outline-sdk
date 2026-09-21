@@ -151,9 +151,21 @@ func TestQUICPreludeOptionLength(t *testing.T) {
 	preludes := preludesFor(t, "length=1300")
 	require.Len(t, preludes[0], 1300)
 
+	// "match" is the default, and can also be written explicitly.
+	payload := make([]byte, 1350)
+	preludes = preludesForPacket(t, "length=match", payload)
+	require.Len(t, preludes[0], len(payload))
+	preludes = preludesForPacket(t, "length=MATCH", payload)
+	require.Len(t, preludes[0], len(payload))
+
 	// An Initial-shaped datagram has an RFC 9000 minimum size.
 	require.Error(t, errorFor(t, "length=100"))
 	require.Error(t, errorFor(t, "length=big"))
+
+	// Zero is not a spelling of "match"; it would be a magic number in a config
+	// string.
+	require.Error(t, errorFor(t, "length=0"))
+	require.Error(t, errorFor(t, "length=-1"))
 }
 
 func TestQUICPreludeOptionVersion(t *testing.T) {

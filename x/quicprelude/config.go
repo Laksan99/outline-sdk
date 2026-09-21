@@ -123,7 +123,7 @@ func (c *preludeConn) sendPreludeOnce(packet []byte, addr net.Addr) error {
 		return nil
 	}
 
-	datagrams, err := c.generator(packet, addr)
+	datagrams, err := c.generator(GeneratorInput{Packet: packet, Destination: addr})
 	if err != nil {
 		return fmt.Errorf("quicprelude: build prelude: %w", err)
 	}

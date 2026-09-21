@@ -48,7 +48,10 @@ func generate(t *testing.T, generator Generator) []byte {
 // generateFor calls a generator with the packet it would precede.
 func generateFor(t *testing.T, generator Generator, packet []byte) [][]byte {
 	t.Helper()
-	datagrams, err := generator(packet, &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 443})
+	datagrams, err := generator(GeneratorInput{
+		Packet:      packet,
+		Destination: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 443},
+	})
 	require.NoError(t, err)
 	return datagrams
 }
@@ -226,14 +229,14 @@ func TestRepeatRejectsBadArguments(t *testing.T) {
 func TestGeneratorCanSplitAndDecline(t *testing.T) {
 	// A generator returning several datagrams sends all of them, which is how a
 	// split Initial would be expressed.
-	split := Generator(func(packet []byte, _ net.Addr) ([][]byte, error) {
-		half := len(packet) / 2
-		return [][]byte{packet[:half], packet[half:]}, nil
+	split := Generator(func(input GeneratorInput) ([][]byte, error) {
+		half := len(input.Packet) / 2
+		return [][]byte{input.Packet[:half], input.Packet[half:]}, nil
 	})
 	require.Len(t, generateFor(t, split, make([]byte, 100)), 2)
 
 	// Returning nothing is how a generator declines.
-	decline := Generator(func([]byte, net.Addr) ([][]byte, error) { return nil, nil })
+	decline := Generator(func(GeneratorInput) ([][]byte, error) { return nil, nil })
 	require.Empty(t, generateFor(t, decline, make([]byte, 100)))
 }
 

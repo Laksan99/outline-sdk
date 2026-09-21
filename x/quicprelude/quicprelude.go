@@ -88,17 +88,32 @@ const (
 	maxProtectedLength = 1 << 14
 )
 
-// Generator returns the datagrams to send to dst ahead of packet, which is the
-// datagram about to be written. Being given the packet lets a generator match
-// its length, read the Server Name Indication out of an Initial, or decline.
+// GeneratorInput describes the write a prelude is about to precede.
 //
-// Returning no datagrams sends packet unchanged, and leaves the destination
+// It is a struct so that fields can be added without breaking implementations
+// of [Generator]. A generator should ignore fields it does not recognize.
+type GeneratorInput struct {
+	// Packet is the datagram about to be written. A generator may read it to
+	// match its length, to find the Server Name Indication in an Initial, or to
+	// decide whether to act at all. It must not be modified.
+	Packet []byte
+
+	// Destination is where Packet is addressed. It is not derivable from Packet,
+	// and is what a generator needs to vary by target.
+	Destination net.Addr
+}
+
+// Generator returns the datagrams to send ahead of the write described by
+// input. Being given the packet lets a generator match its length, read the
+// Server Name Indication out of an Initial, or decline.
+//
+// Returning no datagrams sends the packet unchanged, and leaves the destination
 // unmarked, so a generator that is waiting for a QUIC Initial is consulted
 // again on the next datagram to that destination rather than being locked out
 // by an unrelated first packet.
 //
 // Returning an error aborts the write, and the caller sees that error.
-type Generator func(packet []byte, dst net.Addr) ([][]byte, error)
+type Generator func(input GeneratorInput) ([][]byte, error)
 
 // Random returns a [Generator] producing opaque random bytes. A middlebox that
 // parses QUIC will not recognize them as QUIC at all, which makes this useful
@@ -107,8 +122,8 @@ func Random(length int) (Generator, error) {
 	if length < 0 {
 		return nil, fmt.Errorf("length must not be negative, got %d", length)
 	}
-	return func(packet []byte, _ net.Addr) ([][]byte, error) {
-		datagram, err := randomBytes(lengthFor(length, packet, 1))
+	return func(input GeneratorInput) ([][]byte, error) {
+		datagram, err := randomBytes(lengthFor(length, input.Packet, 1))
 		if err != nil {
 			return nil, err
 		}
@@ -133,8 +148,8 @@ func InvalidInitial(version uint32, length int) (Generator, error) {
 			return nil, err
 		}
 	}
-	return func(packet []byte, _ net.Addr) ([][]byte, error) {
-		datagram, err := invalidInitial(version, lengthFor(length, packet, DefaultLength))
+	return func(input GeneratorInput) ([][]byte, error) {
+		datagram, err := invalidInitial(version, lengthFor(length, input.Packet, DefaultLength))
 		if err != nil {
 			return nil, err
 		}
@@ -152,10 +167,10 @@ func Repeat(count int, generator Generator) (Generator, error) {
 	if generator == nil {
 		return nil, fmt.Errorf("generator must not be nil")
 	}
-	return func(packet []byte, dst net.Addr) ([][]byte, error) {
+	return func(input GeneratorInput) ([][]byte, error) {
 		var datagrams [][]byte
 		for range count {
-			next, err := generator(packet, dst)
+			next, err := generator(input)
 			if err != nil {
 				return nil, err
 			}

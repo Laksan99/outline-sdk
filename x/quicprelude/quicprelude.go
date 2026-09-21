@@ -26,13 +26,14 @@
 //	config := quicprelude.NewConfig()
 //	listener, err := config.NewPacketListener(inner)
 //
-// The datagrams come from a [Generator]. [InvalidInitial] and [Random] cover
-// the cases this package was written for, and a caller who needs something else
-// supplies their own:
+// The datagrams come from a [Generator], which is handed the packet it is about
+// to precede. [InvalidInitial] and [Random] cover the cases this package was
+// written for, [Repeat] sends one of them several times, and a caller who needs
+// something else supplies their own:
 //
-//	generator, err := quicprelude.InvalidInitial(quicprelude.Version2, 1280)
+//	generator, err := quicprelude.InvalidInitial(quicprelude.Version2, quicprelude.MatchPacketLength)
+//	generator, err = quicprelude.Repeat(2, generator)
 //	listener, err := quicprelude.NewConfig().
-//		WithCount(2).
 //		WithGenerator(generator).
 //		NewPacketListener(inner)
 //
@@ -65,6 +66,12 @@ const (
 	// versions it recognizes has no reason to hold this one in its list.
 	DefaultVersion uint32 = 0x1a2a3a4a
 
+	// MatchPacketLength asks a generator to size each datagram to match the
+	// packet it precedes, so the prelude is not distinguishable by size from the
+	// traffic it is mixed with. A packet whose length could not carry an Initial
+	// falls back to the generator's default.
+	MatchPacketLength = 0
+
 	// Version1 and Version2 are the wire codepoints of RFC 9000 and RFC 9369.
 	Version1 uint32 = 0x00000001
 	Version2 uint32 = 0x6b3343cf
@@ -81,23 +88,31 @@ const (
 	maxProtectedLength = 1 << 14
 )
 
-// Generator builds one datagram to send to dst before the flow's real traffic.
-// It is called once per datagram, so a generator that varies its output
-// produces datagrams that differ on the wire.
+// Generator returns the datagrams to send to dst ahead of packet, which is the
+// datagram about to be written. Being given the packet lets a generator match
+// its length, read the Server Name Indication out of an Initial, or decline.
 //
-// Returning an error aborts the write that triggered the prelude, and the
-// caller sees that error.
-type Generator func(dst net.Addr) ([]byte, error)
+// Returning no datagrams sends packet unchanged, and leaves the destination
+// unmarked, so a generator that is waiting for a QUIC Initial is consulted
+// again on the next datagram to that destination rather than being locked out
+// by an unrelated first packet.
+//
+// Returning an error aborts the write, and the caller sees that error.
+type Generator func(packet []byte, dst net.Addr) ([][]byte, error)
 
 // Random returns a [Generator] producing opaque random bytes. A middlebox that
 // parses QUIC will not recognize them as QUIC at all, which makes this useful
 // as a control rather than as a technique.
 func Random(length int) (Generator, error) {
-	if length <= 0 {
-		return nil, fmt.Errorf("length must be positive, got %d", length)
+	if length < 0 {
+		return nil, fmt.Errorf("length must not be negative, got %d", length)
 	}
-	return func(net.Addr) ([]byte, error) {
-		return randomBytes(length)
+	return func(packet []byte, _ net.Addr) ([][]byte, error) {
+		datagram, err := randomBytes(lengthFor(length, packet, 1))
+		if err != nil {
+			return nil, err
+		}
+		return [][]byte{datagram}, nil
 	}, nil
 }
 
@@ -113,12 +128,55 @@ func InvalidInitial(version uint32, length int) (Generator, error) {
 	if version == 0 {
 		return nil, fmt.Errorf("version must not be zero, which denotes Version Negotiation")
 	}
-	if err := ValidateInitialLength(length); err != nil {
-		return nil, err
+	if length != MatchPacketLength {
+		if err := ValidateInitialLength(length); err != nil {
+			return nil, err
+		}
 	}
-	return func(net.Addr) ([]byte, error) {
-		return invalidInitial(version, length)
+	return func(packet []byte, _ net.Addr) ([][]byte, error) {
+		datagram, err := invalidInitial(version, lengthFor(length, packet, DefaultLength))
+		if err != nil {
+			return nil, err
+		}
+		return [][]byte{datagram}, nil
 	}, nil
+}
+
+// Repeat returns a [Generator] that calls generator count times and
+// concatenates the result. A count of zero yields a generator that sends
+// nothing, which disables the prelude.
+func Repeat(count int, generator Generator) (Generator, error) {
+	if count < 0 {
+		return nil, fmt.Errorf("count must not be negative, got %d", count)
+	}
+	if generator == nil {
+		return nil, fmt.Errorf("generator must not be nil")
+	}
+	return func(packet []byte, dst net.Addr) ([][]byte, error) {
+		var datagrams [][]byte
+		for range count {
+			next, err := generator(packet, dst)
+			if err != nil {
+				return nil, err
+			}
+			datagrams = append(datagrams, next...)
+		}
+		return datagrams, nil
+	}, nil
+}
+
+// lengthFor resolves a configured length against the packet being preceded.
+// MatchPacketLength takes the packet's own length, so the prelude is not
+// distinguishable by size, falling back when that length could not carry an
+// Initial.
+func lengthFor(configured int, packet []byte, fallback int) int {
+	if configured != MatchPacketLength {
+		return configured
+	}
+	if ValidateInitialLength(len(packet)) != nil {
+		return fallback
+	}
+	return len(packet)
 }
 
 // ValidateInitialLength reports whether length can carry an Initial-shaped

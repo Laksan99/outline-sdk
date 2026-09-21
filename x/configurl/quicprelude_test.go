@@ -60,6 +60,13 @@ func (l *fixedListener) ListenPacket(context.Context) (net.PacketConn, error) {
 // of the package's internal representation.
 func preludesFor(t *testing.T, options string) [][]byte {
 	t.Helper()
+	// An Initial-sized payload, so length matching is exercised rather than the
+	// fallback for a packet too short to be an Initial.
+	return preludesForPacket(t, options, make([]byte, quicprelude.DefaultLength))
+}
+
+func preludesForPacket(t *testing.T, options string, payload []byte) [][]byte {
+	t.Helper()
 	config, err := ParseConfig("quicprelude:" + options)
 	require.NoError(t, err)
 	preludeConfig, err := newQUICPreludeConfigFromURL(config.URL)
@@ -71,7 +78,6 @@ func preludesFor(t *testing.T, options string) [][]byte {
 	conn, err := listener.ListenPacket(t.Context())
 	require.NoError(t, err)
 
-	payload := []byte("payload")
 	_, err = conn.WriteTo(payload, &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 443})
 	require.NoError(t, err)
 
@@ -104,11 +110,19 @@ func TestRegisterQUICPreludePacketListener(t *testing.T) {
 }
 
 func TestQUICPreludeDefaults(t *testing.T) {
-	preludes := preludesFor(t, "")
+	// By default one Initial-shaped datagram carrying the reserved codepoint,
+	// sized to match the packet it precedes.
+	payload := make([]byte, 1350)
+	preludes := preludesForPacket(t, "", payload)
 
 	require.Len(t, preludes, 1)
-	require.Len(t, preludes[0], quicprelude.DefaultLength)
+	require.Len(t, preludes[0], len(payload))
 	require.Equal(t, quicprelude.DefaultVersion, versionOf(preludes[0]))
+
+	// A packet too short to be an Initial falls back to a valid length.
+	preludes = preludesForPacket(t, "", make([]byte, 40))
+	require.Len(t, preludes, 1)
+	require.Len(t, preludes[0], quicprelude.DefaultLength)
 }
 
 func TestQUICPreludeOptionCount(t *testing.T) {

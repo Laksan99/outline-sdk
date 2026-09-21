@@ -52,7 +52,7 @@ func newQUICPreludeConfigFromURL(configURL url.URL) (*quicprelude.Config, error)
 	options := quicPreludeOptions{
 		count:   1,
 		mode:    "invalid-initial",
-		length:  quicprelude.DefaultLength,
+		length:  quicprelude.MatchPacketLength,
 		version: quicprelude.DefaultVersion,
 	}
 
@@ -84,15 +84,17 @@ func newQUICPreludeConfigFromURL(configURL url.URL) (*quicprelude.Config, error)
 			return nil, fmt.Errorf("unsupported option %v", key)
 		}
 	}
-	if options.count < 0 {
-		return nil, fmt.Errorf("invalid quicprelude options: count must not be negative, got %d", options.count)
-	}
-
 	generator, err := newQUICPreludeGenerator(options)
 	if err != nil {
 		return nil, fmt.Errorf("invalid quicprelude options: %w", err)
 	}
-	return quicprelude.NewConfig().WithCount(options.count).WithGenerator(generator), nil
+	// count is applied by repeating the generator, so count=0 disables the
+	// prelude without needing a separate switch.
+	generator, err = quicprelude.Repeat(options.count, generator)
+	if err != nil {
+		return nil, fmt.Errorf("invalid quicprelude options: %w", err)
+	}
+	return quicprelude.NewConfig().WithGenerator(generator), nil
 }
 
 func newQUICPreludeGenerator(options quicPreludeOptions) (quicprelude.Generator, error) {

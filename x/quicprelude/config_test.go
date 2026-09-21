@@ -87,6 +87,14 @@ func (l *fixedListener) ListenPacket(context.Context) (net.PacketConn, error) {
 	return l.conn, nil
 }
 
+// mustDefaultGenerator returns the generator NewConfig uses.
+func mustDefaultGenerator(t *testing.T) Generator {
+	t.Helper()
+	generator, err := InvalidInitial(DefaultVersion, MatchPacketLength)
+	require.NoError(t, err)
+	return generator
+}
+
 func newTestConn(t *testing.T, config *Config) (net.PacketConn, *recordingConn) {
 	t.Helper()
 	inner := &recordingConn{}
@@ -105,16 +113,21 @@ func udpAddr(t *testing.T, address string) net.Addr {
 }
 
 func TestPreludePrecedesFirstWrite(t *testing.T) {
-	conn, inner := newTestConn(t, NewConfig().WithCount(3))
+	repeated, err := Repeat(3, mustDefaultGenerator(t))
+	require.NoError(t, err)
+	conn, inner := newTestConn(t, NewConfig().WithGenerator(repeated))
 
-	payload := []byte("real traffic")
-	_, err := conn.WriteTo(payload, udpAddr(t, "192.0.2.1:443"))
+	// A realistic Initial-sized payload, so the default generator's length
+	// matching is exercised rather than its fallback.
+	payload := make([]byte, DefaultLength)
+	copy(payload, "real traffic")
+	_, err = conn.WriteTo(payload, udpAddr(t, "192.0.2.1:443"))
 	require.NoError(t, err)
 
 	writes, addrs := inner.snapshot()
 	require.Len(t, writes, 4, "expected 3 preludes followed by the payload")
 	for i := range 3 {
-		require.Len(t, writes[i], 1280, "prelude %d", i+1)
+		require.Len(t, writes[i], len(payload), "prelude %d should match the packet length", i+1)
 		require.Equal(t, byte(0xc0), writes[i][0]&0xc0, "prelude %d is not long-header shaped", i+1)
 		require.Equal(t, "192.0.2.1:443", addrs[i], "prelude %d destination", i+1)
 	}
@@ -177,14 +190,30 @@ func TestPreludeRetriedAfterWriteFailure(t *testing.T) {
 	require.Len(t, writes[0], DefaultLength)
 }
 
-func TestZeroCountReturnsInnerConnUnwrapped(t *testing.T) {
-	inner := &recordingConn{}
-	listener, err := NewConfig().WithCount(0).NewPacketListener(&fixedListener{conn: inner})
-	require.NoError(t, err)
+func TestDecliningGeneratorSendsNothingAndKeepsAsking(t *testing.T) {
+	// A generator that only preludes QUIC long headers must not be locked out by
+	// an unrelated datagram, such as a DNS query, going to the same destination
+	// first.
+	conn, inner := newTestConn(t, NewConfig().WithGenerator(
+		func(packet []byte, _ net.Addr) ([][]byte, error) {
+			if len(packet) == 0 || packet[0]&0x80 == 0 {
+				return nil, nil
+			}
+			return [][]byte{[]byte("prelude")}, nil
+		}))
+	destination := udpAddr(t, "192.0.2.1:443")
 
-	conn, err := listener.ListenPacket(context.Background())
+	_, err := conn.WriteTo([]byte{0x00, 0x01}, destination)
 	require.NoError(t, err)
-	require.Same(t, inner, conn, "a disabled prelude should not wrap the connection")
+	writes, _ := inner.snapshot()
+	require.Len(t, writes, 1, "a declined prelude sends the payload alone")
+
+	// The long-header packet still gets its prelude.
+	_, err = conn.WriteTo([]byte{0xc0, 0x02}, destination)
+	require.NoError(t, err)
+	writes, _ = inner.snapshot()
+	require.Len(t, writes, 3)
+	require.Equal(t, []byte("prelude"), writes[1])
 }
 
 func TestNewPacketListenerRequiresInnerListener(t *testing.T) {
@@ -192,19 +221,9 @@ func TestNewPacketListenerRequiresInnerListener(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestNewPacketListenerRejectsNegativeCount(t *testing.T) {
-	_, err := NewConfig().WithCount(-1).NewPacketListener(&fixedListener{conn: &recordingConn{}})
-	require.Error(t, err)
-}
-
 func TestNewPacketListenerRequiresGenerator(t *testing.T) {
 	_, err := NewConfig().WithGenerator(nil).NewPacketListener(&fixedListener{conn: &recordingConn{}})
 	require.Error(t, err)
-
-	// A nil generator is fine while the prelude is disabled, since it is never
-	// called.
-	_, err = NewConfig().WithCount(0).WithGenerator(nil).NewPacketListener(&fixedListener{conn: &recordingConn{}})
-	require.NoError(t, err)
 }
 
 func TestListenersDoNotSeeLaterConfigChanges(t *testing.T) {
@@ -214,7 +233,9 @@ func TestListenersDoNotSeeLaterConfigChanges(t *testing.T) {
 	require.NoError(t, err)
 
 	// Reconfiguring the Config must not reach a listener already created.
-	config.WithCount(5)
+	repeated, err := Repeat(5, mustDefaultGenerator(t))
+	require.NoError(t, err)
+	config.WithGenerator(repeated)
 
 	conn, err := listener.ListenPacket(context.Background())
 	require.NoError(t, err)
@@ -226,10 +247,12 @@ func TestListenersDoNotSeeLaterConfigChanges(t *testing.T) {
 func TestGeneratorReceivesDestinationAndErrorsPropagate(t *testing.T) {
 	inner := &recordingConn{}
 	var gotDst net.Addr
+	var gotPacket []byte
 	listener, err := NewConfig().
-		WithGenerator(func(dst net.Addr) ([]byte, error) {
+		WithGenerator(func(packet []byte, dst net.Addr) ([][]byte, error) {
 			gotDst = dst
-			return []byte("custom prelude"), nil
+			gotPacket = append([]byte(nil), packet...)
+			return [][]byte{[]byte("custom prelude")}, nil
 		}).
 		NewPacketListener(&fixedListener{conn: inner})
 	require.NoError(t, err)
@@ -241,13 +264,14 @@ func TestGeneratorReceivesDestinationAndErrorsPropagate(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, destination.String(), gotDst.String(), "the generator is told where the datagram goes")
+	require.Equal(t, []byte("payload"), gotPacket, "the generator is given the packet it precedes")
 	writes, _ := inner.snapshot()
 	require.Len(t, writes, 2)
 	require.Equal(t, []byte("custom prelude"), writes[0])
 
 	// A generator that fails aborts the write rather than sending unpreluded.
 	failing, err := NewConfig().
-		WithGenerator(func(net.Addr) ([]byte, error) { return nil, errors.New("no datagram") }).
+		WithGenerator(func([]byte, net.Addr) ([][]byte, error) { return nil, errors.New("no datagram") }).
 		NewPacketListener(&fixedListener{conn: &recordingConn{}})
 	require.NoError(t, err)
 	conn, err = failing.ListenPacket(context.Background())

@@ -36,12 +36,21 @@ func requireLongHeader(t *testing.T, p []byte, length int) (version uint32, pack
 	return version, p[0] & 0x30
 }
 
-// generate calls a generator once with a placeholder destination.
+// generate calls a generator once with a placeholder packet and destination,
+// and requires it to return exactly one datagram.
 func generate(t *testing.T, generator Generator) []byte {
 	t.Helper()
-	p, err := generator(&net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 443})
+	datagrams := generateFor(t, generator, make([]byte, DefaultLength))
+	require.Len(t, datagrams, 1)
+	return datagrams[0]
+}
+
+// generateFor calls a generator with the packet it would precede.
+func generateFor(t *testing.T, generator Generator, packet []byte) [][]byte {
+	t.Helper()
+	datagrams, err := generator(packet, &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 443})
 	require.NoError(t, err)
-	return p
+	return datagrams
 }
 
 func TestInvalidInitialV1UsesInitialTypeBits(t *testing.T) {
@@ -143,12 +152,89 @@ func TestRandomIsNotInitialShaped(t *testing.T) {
 	require.True(t, sawNonLongHeader, "every random datagram set the long-header bits")
 }
 
-func TestRandomRejectsBadLength(t *testing.T) {
-	_, err := Random(0)
+func TestRandomRejectsNegativeLength(t *testing.T) {
+	_, err := Random(-1)
+	require.Error(t, err)
+}
+
+func TestInvalidInitialMatchesPacketLength(t *testing.T) {
+	generator, err := InvalidInitial(DefaultVersion, MatchPacketLength)
+	require.NoError(t, err)
+
+	// A prelude sized like the packet it precedes is not separable by size.
+	for _, length := range []int{MinimumInitialLength, 1280, 1350} {
+		datagrams := generateFor(t, generator, make([]byte, length))
+		require.Len(t, datagrams, 1)
+		require.Len(t, datagrams[0], length)
+		requireLongHeader(t, datagrams[0], length)
+	}
+}
+
+func TestInvalidInitialFallsBackWhenPacketCannotCarryAnInitial(t *testing.T) {
+	generator, err := InvalidInitial(DefaultVersion, MatchPacketLength)
+	require.NoError(t, err)
+
+	// A short packet, such as a DNS query, is not a length an Initial can have,
+	// so the generator falls back rather than emitting an invalid datagram.
+	datagrams := generateFor(t, generator, make([]byte, 40))
+	require.Len(t, datagrams, 1)
+	require.Len(t, datagrams[0], DefaultLength)
+}
+
+func TestRandomMatchesPacketLength(t *testing.T) {
+	generator, err := Random(MatchPacketLength)
+	require.NoError(t, err)
+
+	datagrams := generateFor(t, generator, make([]byte, 1300))
+	require.Len(t, datagrams, 1)
+	require.Len(t, datagrams[0], 1300)
+}
+
+func TestRepeatConcatenatesDatagrams(t *testing.T) {
+	inner, err := InvalidInitial(Version1, 1280)
+	require.NoError(t, err)
+	generator, err := Repeat(3, inner)
+	require.NoError(t, err)
+
+	datagrams := generateFor(t, generator, make([]byte, DefaultLength))
+	require.Len(t, datagrams, 3)
+	// Each call generates fresh randomness, so the repeats must differ.
+	require.NotEqual(t, datagrams[0], datagrams[1])
+	require.NotEqual(t, datagrams[1], datagrams[2])
+}
+
+func TestRepeatZeroDisablesThePrelude(t *testing.T) {
+	inner, err := InvalidInitial(Version1, 1280)
+	require.NoError(t, err)
+	generator, err := Repeat(0, inner)
+	require.NoError(t, err)
+
+	require.Empty(t, generateFor(t, generator, make([]byte, DefaultLength)))
+}
+
+func TestRepeatRejectsBadArguments(t *testing.T) {
+	inner, err := InvalidInitial(Version1, 1280)
+	require.NoError(t, err)
+
+	_, err = Repeat(-1, inner)
 	require.Error(t, err)
 
-	_, err = Random(-1)
+	_, err = Repeat(1, nil)
 	require.Error(t, err)
+}
+
+func TestGeneratorCanSplitAndDecline(t *testing.T) {
+	// A generator returning several datagrams sends all of them, which is how a
+	// split Initial would be expressed.
+	split := Generator(func(packet []byte, _ net.Addr) ([][]byte, error) {
+		half := len(packet) / 2
+		return [][]byte{packet[:half], packet[half:]}, nil
+	})
+	require.Len(t, generateFor(t, split, make([]byte, 100)), 2)
+
+	// Returning nothing is how a generator declines.
+	decline := Generator(func([]byte, net.Addr) ([][]byte, error) { return nil, nil })
+	require.Empty(t, generateFor(t, decline, make([]byte, 100)))
 }
 
 func TestNewConfigDefaults(t *testing.T) {
@@ -158,13 +244,14 @@ func TestNewConfigDefaults(t *testing.T) {
 	conn, err := listener.ListenPacket(t.Context())
 	require.NoError(t, err)
 
-	_, err = conn.WriteTo([]byte("x"), udpAddr(t, "192.0.2.1:443"))
+	_, err = conn.WriteTo(make([]byte, DefaultLength), udpAddr(t, "192.0.2.1:443"))
 	require.NoError(t, err)
 
-	// One Initial-shaped datagram of DefaultLength carrying DefaultVersion.
+	// One Initial-shaped datagram carrying DefaultVersion, sized to match the
+	// packet it preceded.
 	writes, _ := inner.snapshot()
 	require.Len(t, writes, 2)
-	version, packetType := requireLongHeader(t, writes[0], DefaultLength)
+	version, packetType := requireLongHeader(t, writes[0], len(writes[1]))
 	require.Equal(t, DefaultVersion, version)
 	require.Equal(t, byte(0x00), packetType)
 }

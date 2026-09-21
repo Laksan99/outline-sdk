@@ -37,27 +37,20 @@ const maxTrackedDestinations = 1024
 // copy of the settings, so configuring the Config afterwards does not affect
 // listeners already created.
 type Config struct {
-	count     int
 	generator Generator
 }
 
-// NewConfig returns a Config that sends one Initial-shaped datagram of
-// [DefaultLength] bytes carrying [DefaultVersion]. It never fails; problems
-// with the configuration surface in [Config.NewPacketListener].
+// NewConfig returns a Config that sends one Initial-shaped datagram carrying
+// [DefaultVersion], sized to match the packet it precedes. It never fails;
+// problems with the configuration surface in [Config.NewPacketListener].
 func NewConfig() *Config {
 	// The default arguments are constants known to be valid, so the error
 	// cannot occur.
-	generator, err := InvalidInitial(DefaultVersion, DefaultLength)
+	generator, err := InvalidInitial(DefaultVersion, MatchPacketLength)
 	if err != nil {
 		panic("quicprelude: default generator is invalid: " + err.Error())
 	}
-	return &Config{count: 1, generator: generator}
-}
-
-// WithCount sets how many datagrams to send. Zero disables the prelude.
-func (c *Config) WithCount(count int) *Config {
-	c.count = count
-	return c
+	return &Config{generator: generator}
 }
 
 // WithGenerator sets what the datagrams contain, replacing the default.
@@ -76,19 +69,15 @@ func (c *Config) NewPacketListener(inner transport.PacketListener) (transport.Pa
 	if inner == nil {
 		return nil, errors.New("quicprelude: inner listener must not be nil")
 	}
-	if c.count < 0 {
-		return nil, fmt.Errorf("quicprelude: count must not be negative, got %d", c.count)
-	}
-	if c.count > 0 && c.generator == nil {
-		return nil, errors.New("quicprelude: generator must not be nil when count is positive")
+	if c.generator == nil {
+		return nil, errors.New("quicprelude: generator must not be nil")
 	}
 	// Copied, so configuring the Config afterwards does not reach this listener.
-	return &packetListener{inner: inner, count: c.count, generator: c.generator}, nil
+	return &packetListener{inner: inner, generator: c.generator}, nil
 }
 
 type packetListener struct {
 	inner     transport.PacketListener
-	count     int
 	generator Generator
 }
 
@@ -97,12 +86,8 @@ func (l *packetListener) ListenPacket(ctx context.Context) (net.PacketConn, erro
 	if err != nil {
 		return nil, err
 	}
-	if l.count == 0 {
-		return conn, nil
-	}
 	return &preludeConn{
 		PacketConn: conn,
-		count:      l.count,
 		generator:  l.generator,
 		seen:       make(map[string]bool),
 	}, nil
@@ -113,7 +98,6 @@ func (l *packetListener) ListenPacket(ctx context.Context) (net.PacketConn, erro
 type preludeConn struct {
 	net.PacketConn
 
-	count     int
 	generator Generator
 
 	mu   sync.Mutex
@@ -124,13 +108,13 @@ type preludeConn struct {
 // writes p. The prelude is sent while holding the lock so that a concurrent
 // write to the same destination cannot overtake it.
 func (c *preludeConn) WriteTo(p []byte, addr net.Addr) (int, error) {
-	if err := c.sendPreludeOnce(addr); err != nil {
+	if err := c.sendPreludeOnce(p, addr); err != nil {
 		return 0, err
 	}
 	return c.PacketConn.WriteTo(p, addr)
 }
 
-func (c *preludeConn) sendPreludeOnce(addr net.Addr) error {
+func (c *preludeConn) sendPreludeOnce(packet []byte, addr net.Addr) error {
 	key := addr.String()
 
 	c.mu.Lock()
@@ -138,18 +122,26 @@ func (c *preludeConn) sendPreludeOnce(addr net.Addr) error {
 	if c.seen[key] {
 		return nil
 	}
-	if len(c.seen) >= maxTrackedDestinations {
-		clear(c.seen)
+
+	datagrams, err := c.generator(packet, addr)
+	if err != nil {
+		return fmt.Errorf("quicprelude: build prelude: %w", err)
+	}
+	if len(datagrams) == 0 {
+		// The generator declined. Leave the destination unmarked so it is asked
+		// again, rather than locking out a QUIC flow because an unrelated
+		// datagram happened to go first.
+		return nil
 	}
 
-	for i := range c.count {
-		datagram, err := c.generator(addr)
-		if err != nil {
-			return fmt.Errorf("quicprelude: build datagram %d: %w", i+1, err)
-		}
+	for i, datagram := range datagrams {
 		if _, err := c.PacketConn.WriteTo(datagram, addr); err != nil {
 			return fmt.Errorf("quicprelude: send datagram %d: %w", i+1, err)
 		}
+	}
+
+	if len(c.seen) >= maxTrackedDestinations {
+		clear(c.seen)
 	}
 	// Recorded only after every datagram is sent, so a failed attempt is retried
 	// rather than silently skipped on the next write.

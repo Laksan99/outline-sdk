@@ -25,9 +25,10 @@ fetch -proto h3 -quic-versions 1 -method HEAD -v \
   -transport 'quicprelude:count=1&version=0x1a2a3a4a' https://example.com/
 ```
 
-Options, all optional: `count` (default 1), `mode` (`invalid-initial`, the
-default, or `random`), `length` (default 1280) and `version` (default
-`0x1a2a3a4a`, a reserved codepoint; also accepts `v1`, `v2`, or any hex
+Options, all optional: `count` (default 1, where 0 disables the prelude), `mode`
+(`invalid-initial`, the default, or `random`), `length` (defaults to matching
+the packet the prelude precedes, so it is not separable by size) and `version`
+(default `0x1a2a3a4a`, a reserved codepoint; also accepts `v1`, `v2`, or any hex
 codepoint).
 
 Because it is an ordinary transport, it stacks above a proxy, and the prelude

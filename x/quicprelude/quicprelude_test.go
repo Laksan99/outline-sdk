@@ -203,6 +203,26 @@ func TestRandomMatchesPacketLength(t *testing.T) {
 	datagrams := generateFor(t, generator, make([]byte, 1300))
 	require.Len(t, datagrams, 1)
 	require.Len(t, datagrams[0], 1300)
+
+	// Random bytes need no Initial-sized minimum, so a short packet is matched
+	// exactly rather than replaced by a fallback that would stand out.
+	datagrams = generateFor(t, generator, make([]byte, 40))
+	require.Len(t, datagrams[0], 40)
+
+	// Only an empty packet, which has no length to match, falls back.
+	datagrams = generateFor(t, generator, nil)
+	require.Len(t, datagrams[0], DefaultLength)
+}
+
+func TestRepeatRejectsCountOutOfRange(t *testing.T) {
+	inner, err := Random(1280)
+	require.NoError(t, err)
+	_, err = Repeat(-1, inner)
+	require.Error(t, err)
+	_, err = Repeat(MaxRepeat+1, inner)
+	require.Error(t, err)
+	_, err = Repeat(MaxRepeat, inner)
+	require.NoError(t, err)
 }
 
 func TestRepeatConcatenatesDatagrams(t *testing.T) {

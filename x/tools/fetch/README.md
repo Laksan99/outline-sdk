@@ -30,7 +30,7 @@ reach for first:
 
 | Option | Default | Meaning |
 |---|---|---|
-| `count` | `1` | Number of datagrams; `0` disables the prelude |
+| `count` | `1` | Number of datagrams, at most 16; `0` disables the prelude |
 | `mode` | `invalid-initial` | Or `random`, which is useful as a control |
 | `length` | `match` | `match` sizes each datagram like the packet it precedes; or give a byte count |
 | `version` | `reserved` | Range to draw a fresh codepoint from per datagram: `reserved` (`0x?a?a?a?a`) or `draft`; or a fixed `v1`, `v2`, or hex value |

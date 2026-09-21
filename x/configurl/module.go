@@ -139,7 +139,7 @@ func SanitizeConfig(configStr string) (string, error) {
 			if err != nil {
 				return "", err
 			}
-		case "override", "split", "tls", "tlsfrag":
+		case "override", "quicprelude", "split", "tls", "tlsfrag":
 			// No sanitization needed
 			part = config.URL.String()
 		default:

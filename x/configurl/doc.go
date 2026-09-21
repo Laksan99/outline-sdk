@@ -149,14 +149,14 @@ Every option may be omitted, and the defaults are the ones to reach for first:
 one Initial-shaped datagram carrying a reserved version codepoint, sized to
 match the packet it precedes.
 
-	count    number of datagrams; 0 disables the prelude (default 1)
+	count    number of datagrams, at most 16; 0 disables the prelude (default 1)
 	mode     invalid-initial or random (default invalid-initial)
 	length   match, or a byte count (default match)
 	version  reserved, draft, v1, v2, or a 32-bit hex codepoint (default reserved)
 
 length=match sizes each datagram like the packet it precedes, so the prelude is
-not separable from it by size. A packet too short to carry an Initial falls back
-to a valid length.
+not separable from it by size. With mode=invalid-initial, a packet too short to
+carry an Initial falls back to a valid length; mode=random always matches.
 
 version names a range to draw a fresh codepoint from for every datagram, so no
 single constant identifies the prelude. reserved uses 0x?a?a?a?a, which RFC 9000

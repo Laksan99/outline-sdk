@@ -36,7 +36,8 @@
 // written for, [Repeat] sends one of them several times, and a caller who needs
 // something else supplies their own:
 //
-//	generator, err := quicprelude.InvalidInitial(quicprelude.Version2, quicprelude.MatchPacketLength)
+//	version, err := quicprelude.FixedVersion(quicprelude.Version2)
+//	generator, err := quicprelude.InvalidInitial(version, quicprelude.MatchPacketLength)
 //	generator, err = quicprelude.Repeat(2, generator)
 //	listener, err := quicprelude.NewConfig().
 //		WithGenerator(generator).
@@ -80,9 +81,16 @@ const (
 
 	// MatchPacketLength asks a generator to size each datagram to match the
 	// packet it precedes, so the prelude is not distinguishable by size from the
-	// traffic it is mixed with. A packet whose length could not carry an Initial
-	// falls back to the generator's default.
+	// traffic it is mixed with. [InvalidInitial] falls back to [DefaultLength]
+	// when the packet's length could not carry an Initial. [Random] has no such
+	// constraint and always matches, falling back only for an empty packet.
 	MatchPacketLength = 0
+
+	// MaxRepeat is the largest count [Repeat] accepts. Every datagram is built
+	// before the first is sent, so an unbounded count would let one write
+	// allocate without limit. Measurements for this package never needed more
+	// than three.
+	MaxRepeat = 16
 
 	// Version1 and Version2 are the wire codepoints of RFC 9000 and RFC 9369.
 	Version1 uint32 = 0x00000001
@@ -146,12 +154,23 @@ type Generator func(input GeneratorInput) ([][]byte, error)
 // Random returns a [Generator] producing opaque random bytes. A middlebox that
 // parses QUIC will not recognize them as QUIC at all, which makes this useful
 // as a control rather than as a technique.
+//
+// With [MatchPacketLength] each datagram is exactly as long as the packet it
+// precedes, whatever that length is, since random bytes need no Initial-sized
+// minimum. That is what makes it a size-matched control.
 func Random(length int) (Generator, error) {
 	if length < 0 {
 		return nil, fmt.Errorf("length must not be negative, got %d", length)
 	}
 	return func(input GeneratorInput) ([][]byte, error) {
-		datagram, err := randomBytes(lengthFor(length, input.Packet, 1))
+		n := length
+		if n == MatchPacketLength {
+			n = len(input.Packet)
+		}
+		if n == 0 {
+			n = DefaultLength
+		}
+		datagram, err := randomBytes(n)
 		if err != nil {
 			return nil, err
 		}
@@ -261,10 +280,10 @@ func isUnassignedDraftVersion(version uint32) bool {
 
 // Repeat returns a [Generator] that calls generator count times and
 // concatenates the result. A count of zero yields a generator that sends
-// nothing, which disables the prelude.
+// nothing, which disables the prelude. count may not exceed [MaxRepeat].
 func Repeat(count int, generator Generator) (Generator, error) {
-	if count < 0 {
-		return nil, fmt.Errorf("count must not be negative, got %d", count)
+	if count < 0 || count > MaxRepeat {
+		return nil, fmt.Errorf("count must be between 0 and %d, got %d", MaxRepeat, count)
 	}
 	if generator == nil {
 		return nil, fmt.Errorf("generator must not be nil")

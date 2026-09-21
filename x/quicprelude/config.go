@@ -25,7 +25,8 @@ import (
 )
 
 // Config describes the datagrams to send ahead of a flow's real traffic, and
-// produces the listener that sends them. Its zero value sends nothing.
+// produces the listener that sends them. Create one with [NewConfig]. A zero
+// Config has no generator, and [Config.NewPacketListener] rejects it.
 //
 // A Config may be reused to create several listeners. Each listener takes a
 // copy of the settings, so configuring the Config afterwards does not affect

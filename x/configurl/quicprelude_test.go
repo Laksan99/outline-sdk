@@ -154,6 +154,8 @@ func TestQUICPreludeOptionCount(t *testing.T) {
 	require.Empty(t, preludesFor(t, "count=0"))
 
 	require.Error(t, errorFor(t, "count=-1"))
+	require.Error(t, errorFor(t, "count=17"), "an unbounded count would let one write allocate without limit")
+	require.Len(t, preludesFor(t, "count=16"), 16)
 	require.Error(t, errorFor(t, "count=many"))
 }
 

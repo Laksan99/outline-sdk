@@ -15,6 +15,7 @@
 package quicprelude
 
 import (
+	"net"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -35,96 +36,89 @@ func requireLongHeader(t *testing.T, p []byte, length int) (version uint32, pack
 	return version, p[0] & 0x30
 }
 
-func TestNewConfigIsValid(t *testing.T) {
-	config := NewConfig()
-	require.NoError(t, config.Validate())
-	require.Equal(t, 1, config.Count)
-	require.Equal(t, ModeInvalidInitial, config.Mode)
-	require.Equal(t, DefaultLength, config.Length)
-	require.Equal(t, DefaultVersion, config.Version)
+// generate calls a generator once with a placeholder destination.
+func generate(t *testing.T, generator Generator) []byte {
+	t.Helper()
+	p, err := generator(&net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 443})
+	require.NoError(t, err)
+	return p
 }
 
-func TestValidateAcceptsDisabledPrelude(t *testing.T) {
-	// A zero count disables the prelude, so the other fields stop mattering.
-	require.NoError(t, Config{Count: 0}.Validate())
-	require.NoError(t, Config{Count: 0, Mode: "nonsense"}.Validate())
-}
-
-func TestValidateRejectsNegativeCount(t *testing.T) {
-	require.Error(t, Config{Count: -1}.Validate())
-}
-
-func TestValidateRandomMode(t *testing.T) {
-	require.NoError(t, Config{Count: 1, Mode: ModeRandom, Length: 1}.Validate())
-
-	// Random datagrams have no minimum size, but they must have one.
-	require.Error(t, Config{Count: 1, Mode: ModeRandom}.Validate())
-}
-
-func TestValidateInvalidInitialMode(t *testing.T) {
-	require.NoError(t, Config{Count: 1, Mode: ModeInvalidInitial, Length: MinimumInitialLength, Version: Version1}.Validate())
-
-	// RFC 9000 requires a client Initial to travel in a datagram of at least
-	// MinimumInitialLength bytes.
-	require.Error(t, Config{Count: 1, Mode: ModeInvalidInitial, Length: MinimumInitialLength - 1, Version: Version1}.Validate())
-
-	// The length field is written as a two-byte varint, which caps the payload.
-	require.Error(t, Config{Count: 1, Mode: ModeInvalidInitial, Length: headerLength + (1 << 14), Version: Version1}.Validate())
-
-	// Version zero denotes Version Negotiation, which a client never sends.
-	require.Error(t, Config{Count: 1, Mode: ModeInvalidInitial, Length: 1280}.Validate())
-}
-
-func TestValidateRejectsUnknownMode(t *testing.T) {
-	require.Error(t, Config{Count: 1, Mode: "handshake", Length: 1280}.Validate())
-}
-
-func TestDatagramV1UsesInitialTypeBits(t *testing.T) {
-	p, err := Config{Count: 1, Mode: ModeInvalidInitial, Length: 1280, Version: Version1}.Datagram()
+func TestInvalidInitialV1UsesInitialTypeBits(t *testing.T) {
+	generator, err := InvalidInitial(Version1, 1280)
 	require.NoError(t, err)
 
-	version, packetType := requireLongHeader(t, p, 1280)
+	version, packetType := requireLongHeader(t, generate(t, generator), 1280)
 	require.Equal(t, Version1, version)
 	// QUIC v1 encodes Initial as 0b00.
 	require.Equal(t, byte(0x00), packetType)
 }
 
-func TestDatagramV2UsesInitialTypeBits(t *testing.T) {
-	p, err := Config{Count: 1, Mode: ModeInvalidInitial, Length: 1280, Version: Version2}.Datagram()
+func TestInvalidInitialV2UsesInitialTypeBits(t *testing.T) {
+	generator, err := InvalidInitial(Version2, 1280)
 	require.NoError(t, err)
 
-	version, packetType := requireLongHeader(t, p, 1280)
+	version, packetType := requireLongHeader(t, generate(t, generator), 1280)
 	require.Equal(t, Version2, version)
 	// QUIC v2 encodes Initial as 0b01. Writing v1's 0b00 here would announce a
 	// Retry packet instead, which is not what we want to be seen sending.
 	require.Equal(t, byte(0x10), packetType)
 }
 
-func TestDatagramUnknownVersionUsesV1Layout(t *testing.T) {
+func TestInvalidInitialUnknownVersionUsesV1Layout(t *testing.T) {
 	// RFC 8999 defines only the header form and version field for a version the
 	// reader does not know, so anything else falls back to the v1 layout.
-	p, err := Config{Count: 1, Mode: ModeInvalidInitial, Length: 1280, Version: DefaultVersion}.Datagram()
+	generator, err := InvalidInitial(DefaultVersion, 1280)
 	require.NoError(t, err)
 
-	version, packetType := requireLongHeader(t, p, 1280)
+	version, packetType := requireLongHeader(t, generate(t, generator), 1280)
 	require.Equal(t, DefaultVersion, version)
 	require.Equal(t, byte(0x00), packetType)
 
-	p, err = Config{Count: 1, Mode: ModeInvalidInitial, Length: 1280, Version: 0xdeadbeef}.Datagram()
+	generator, err = InvalidInitial(0xdeadbeef, 1280)
 	require.NoError(t, err)
 
-	version, packetType = requireLongHeader(t, p, 1280)
+	version, packetType = requireLongHeader(t, generate(t, generator), 1280)
 	require.Equal(t, uint32(0xdeadbeef), version)
 	require.Equal(t, byte(0x00), packetType)
 }
 
-func TestDatagramsDifferBetweenCalls(t *testing.T) {
-	config := NewConfig()
+func TestInvalidInitialRejectsBadArguments(t *testing.T) {
+	// Version zero denotes Version Negotiation, which a client never sends.
+	_, err := InvalidInitial(0, 1280)
+	require.Error(t, err)
 
-	first, err := config.Datagram()
+	// RFC 9000 requires a client Initial to travel in a datagram of at least
+	// MinimumInitialLength bytes.
+	_, err = InvalidInitial(Version1, MinimumInitialLength-1)
+	require.Error(t, err)
+
+	// The length field is written as a two-byte varint, which caps the payload.
+	_, err = InvalidInitial(Version1, headerLength+maxProtectedLength)
+	require.Error(t, err)
+}
+
+func TestInvalidInitialAcceptsBoundaryLengths(t *testing.T) {
+	_, err := InvalidInitial(Version1, MinimumInitialLength)
 	require.NoError(t, err)
-	second, err := config.Datagram()
+
+	_, err = InvalidInitial(Version1, headerLength+maxProtectedLength-1)
 	require.NoError(t, err)
+}
+
+func TestValidateInitialLength(t *testing.T) {
+	require.NoError(t, ValidateInitialLength(MinimumInitialLength))
+	require.NoError(t, ValidateInitialLength(DefaultLength))
+	require.Error(t, ValidateInitialLength(MinimumInitialLength-1))
+	require.Error(t, ValidateInitialLength(headerLength+maxProtectedLength))
+}
+
+func TestDatagramsDifferBetweenCalls(t *testing.T) {
+	generator, err := InvalidInitial(DefaultVersion, DefaultLength)
+	require.NoError(t, err)
+
+	first := generate(t, generator)
+	second := generate(t, generator)
 
 	// Connection IDs and payload are random, so two datagrams must not match.
 	// Identical datagrams would make a repeated prelude trivially fingerprintable.
@@ -132,15 +126,15 @@ func TestDatagramsDifferBetweenCalls(t *testing.T) {
 	require.NotEqual(t, first[6:14], second[6:14], "destination connection IDs")
 }
 
-func TestDatagramRandomModeIsNotInitialShaped(t *testing.T) {
-	config := Config{Count: 1, Mode: ModeRandom, Length: 1280}
+func TestRandomIsNotInitialShaped(t *testing.T) {
+	generator, err := Random(1280)
+	require.NoError(t, err)
 
 	// The first byte is random, so check over enough samples that a datagram
 	// which always looked like a long header would be caught.
 	sawNonLongHeader := false
 	for range 64 {
-		p, err := config.Datagram()
-		require.NoError(t, err)
+		p := generate(t, generator)
 		require.Len(t, p, 1280)
 		if p[0]&0xc0 != 0xc0 {
 			sawNonLongHeader = true
@@ -149,7 +143,28 @@ func TestDatagramRandomModeIsNotInitialShaped(t *testing.T) {
 	require.True(t, sawNonLongHeader, "every random datagram set the long-header bits")
 }
 
-func TestDatagramRejectsInvalidConfig(t *testing.T) {
-	_, err := Config{Count: 1, Mode: ModeInvalidInitial, Length: 100}.Datagram()
+func TestRandomRejectsBadLength(t *testing.T) {
+	_, err := Random(0)
 	require.Error(t, err)
+
+	_, err = Random(-1)
+	require.Error(t, err)
+}
+
+func TestNewConfigDefaults(t *testing.T) {
+	inner := &recordingConn{}
+	listener, err := NewConfig().NewPacketListener(&fixedListener{conn: inner})
+	require.NoError(t, err)
+	conn, err := listener.ListenPacket(t.Context())
+	require.NoError(t, err)
+
+	_, err = conn.WriteTo([]byte("x"), udpAddr(t, "192.0.2.1:443"))
+	require.NoError(t, err)
+
+	// One Initial-shaped datagram of DefaultLength carrying DefaultVersion.
+	writes, _ := inner.snapshot()
+	require.Len(t, writes, 2)
+	version, packetType := requireLongHeader(t, writes[0], DefaultLength)
+	require.Equal(t, DefaultVersion, version)
+	require.Equal(t, byte(0x00), packetType)
 }

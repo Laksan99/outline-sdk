@@ -23,10 +23,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"golang.getoutline.org/sdk/transport"
 )
-
-var _ transport.PacketListener = (*PacketListener)(nil)
 
 // recordingConn records what was written, so a test can assert on the order and
 // shape of the datagrams that reached the wire.
@@ -90,10 +87,11 @@ func (l *fixedListener) ListenPacket(context.Context) (net.PacketConn, error) {
 	return l.conn, nil
 }
 
-func newTestConn(t *testing.T, config Config) (net.PacketConn, *recordingConn) {
+func newTestConn(t *testing.T, config *Config) (net.PacketConn, *recordingConn) {
 	t.Helper()
 	inner := &recordingConn{}
-	listener := &PacketListener{Inner: &fixedListener{conn: inner}, Config: config}
+	listener, err := config.NewPacketListener(&fixedListener{conn: inner})
+	require.NoError(t, err)
 	conn, err := listener.ListenPacket(context.Background())
 	require.NoError(t, err)
 	return conn, inner
@@ -107,7 +105,7 @@ func udpAddr(t *testing.T, address string) net.Addr {
 }
 
 func TestPreludePrecedesFirstWrite(t *testing.T) {
-	conn, inner := newTestConn(t, Config{Count: 3, Mode: ModeInvalidInitial, Length: 1280, Version: DefaultVersion})
+	conn, inner := newTestConn(t, NewConfig().WithCount(3))
 
 	payload := []byte("real traffic")
 	_, err := conn.WriteTo(payload, udpAddr(t, "192.0.2.1:443"))
@@ -181,28 +179,81 @@ func TestPreludeRetriedAfterWriteFailure(t *testing.T) {
 
 func TestZeroCountReturnsInnerConnUnwrapped(t *testing.T) {
 	inner := &recordingConn{}
-	listener := &PacketListener{Inner: &fixedListener{conn: inner}, Config: Config{Count: 0}}
+	listener, err := NewConfig().WithCount(0).NewPacketListener(&fixedListener{conn: inner})
+	require.NoError(t, err)
 
 	conn, err := listener.ListenPacket(context.Background())
 	require.NoError(t, err)
 	require.Same(t, inner, conn, "a disabled prelude should not wrap the connection")
 }
 
-func TestListenPacketRejectsInvalidConfig(t *testing.T) {
-	listener := &PacketListener{
-		Inner:  &fixedListener{conn: &recordingConn{}},
-		Config: Config{Count: 1, Mode: ModeInvalidInitial, Length: 10},
-	}
-
-	_, err := listener.ListenPacket(context.Background())
+func TestNewPacketListenerRequiresInnerListener(t *testing.T) {
+	_, err := NewConfig().NewPacketListener(nil)
 	require.Error(t, err)
 }
 
-func TestListenPacketRequiresInnerListener(t *testing.T) {
-	listener := &PacketListener{Config: NewConfig()}
-
-	_, err := listener.ListenPacket(context.Background())
+func TestNewPacketListenerRejectsNegativeCount(t *testing.T) {
+	_, err := NewConfig().WithCount(-1).NewPacketListener(&fixedListener{conn: &recordingConn{}})
 	require.Error(t, err)
+}
+
+func TestNewPacketListenerRequiresGenerator(t *testing.T) {
+	_, err := NewConfig().WithGenerator(nil).NewPacketListener(&fixedListener{conn: &recordingConn{}})
+	require.Error(t, err)
+
+	// A nil generator is fine while the prelude is disabled, since it is never
+	// called.
+	_, err = NewConfig().WithCount(0).WithGenerator(nil).NewPacketListener(&fixedListener{conn: &recordingConn{}})
+	require.NoError(t, err)
+}
+
+func TestListenersDoNotSeeLaterConfigChanges(t *testing.T) {
+	config := NewConfig()
+	inner := &recordingConn{}
+	listener, err := config.NewPacketListener(&fixedListener{conn: inner})
+	require.NoError(t, err)
+
+	// Reconfiguring the Config must not reach a listener already created.
+	config.WithCount(5)
+
+	conn, err := listener.ListenPacket(context.Background())
+	require.NoError(t, err)
+	_, err = conn.WriteTo([]byte("x"), udpAddr(t, "192.0.2.1:443"))
+	require.NoError(t, err)
+	require.Equal(t, 1, inner.countPreludes(DefaultLength))
+}
+
+func TestGeneratorReceivesDestinationAndErrorsPropagate(t *testing.T) {
+	inner := &recordingConn{}
+	var gotDst net.Addr
+	listener, err := NewConfig().
+		WithGenerator(func(dst net.Addr) ([]byte, error) {
+			gotDst = dst
+			return []byte("custom prelude"), nil
+		}).
+		NewPacketListener(&fixedListener{conn: inner})
+	require.NoError(t, err)
+	conn, err := listener.ListenPacket(context.Background())
+	require.NoError(t, err)
+
+	destination := udpAddr(t, "192.0.2.1:443")
+	_, err = conn.WriteTo([]byte("payload"), destination)
+	require.NoError(t, err)
+
+	require.Equal(t, destination.String(), gotDst.String(), "the generator is told where the datagram goes")
+	writes, _ := inner.snapshot()
+	require.Len(t, writes, 2)
+	require.Equal(t, []byte("custom prelude"), writes[0])
+
+	// A generator that fails aborts the write rather than sending unpreluded.
+	failing, err := NewConfig().
+		WithGenerator(func(net.Addr) ([]byte, error) { return nil, errors.New("no datagram") }).
+		NewPacketListener(&fixedListener{conn: &recordingConn{}})
+	require.NoError(t, err)
+	conn, err = failing.ListenPacket(context.Background())
+	require.NoError(t, err)
+	_, err = conn.WriteTo([]byte("payload"), destination)
+	require.ErrorContains(t, err, "no datagram")
 }
 
 func TestConcurrentWritesSendOnePrelude(t *testing.T) {

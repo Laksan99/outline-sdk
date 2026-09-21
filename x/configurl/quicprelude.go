@@ -27,7 +27,7 @@ import (
 
 func registerQUICPreludePacketListener(r TypeRegistry[transport.PacketListener], typeID string, newPL BuildFunc[transport.PacketListener]) {
 	r.RegisterType(typeID, func(ctx context.Context, config *Config) (transport.PacketListener, error) {
-		pl, err := newPL(ctx, config.BaseConfig)
+		inner, err := newPL(ctx, config.BaseConfig)
 		if err != nil {
 			return nil, err
 		}
@@ -35,50 +35,75 @@ func registerQUICPreludePacketListener(r TypeRegistry[transport.PacketListener],
 		if err != nil {
 			return nil, err
 		}
-		return &quicprelude.PacketListener{Inner: pl, Config: preludeConfig}, nil
+		return preludeConfig.NewPacketListener(inner)
 	})
 }
 
-func newQUICPreludeConfigFromURL(configURL url.URL) (quicprelude.Config, error) {
-	config := quicprelude.NewConfig()
+// quicPreludeOptions holds the options as written in the config string, before
+// they are turned into a generator.
+type quicPreludeOptions struct {
+	count   int
+	mode    string
+	length  int
+	version uint32
+}
+
+func newQUICPreludeConfigFromURL(configURL url.URL) (*quicprelude.Config, error) {
+	options := quicPreludeOptions{
+		count:   1,
+		mode:    "invalid-initial",
+		length:  quicprelude.DefaultLength,
+		version: quicprelude.DefaultVersion,
+	}
+
 	values, err := url.ParseQuery(configURL.Opaque)
 	if err != nil {
-		return config, fmt.Errorf("invalid quicprelude options: %w", err)
+		return nil, fmt.Errorf("invalid quicprelude options: %w", err)
 	}
 	for key, vs := range values {
 		if len(vs) != 1 {
-			return config, fmt.Errorf("option %v must have exactly one value, found %v", key, len(vs))
+			return nil, fmt.Errorf("option %v must have exactly one value, found %v", key, len(vs))
 		}
 		value := vs[0]
 		switch strings.ToLower(key) {
 		case "count":
-			n, err := strconv.Atoi(value)
-			if err != nil {
-				return config, fmt.Errorf("invalid count %q: %w", value, err)
+			if options.count, err = strconv.Atoi(value); err != nil {
+				return nil, fmt.Errorf("invalid count %q: %w", value, err)
 			}
-			config.Count = n
 		case "mode":
-			config.Mode = quicprelude.Mode(value)
+			options.mode = strings.ToLower(value)
 		case "length":
-			n, err := strconv.Atoi(value)
-			if err != nil {
-				return config, fmt.Errorf("invalid length %q: %w", value, err)
+			if options.length, err = strconv.Atoi(value); err != nil {
+				return nil, fmt.Errorf("invalid length %q: %w", value, err)
 			}
-			config.Length = n
 		case "version":
-			v, err := parseQUICVersionCodepoint(value)
-			if err != nil {
-				return config, err
+			if options.version, err = parseQUICVersionCodepoint(value); err != nil {
+				return nil, err
 			}
-			config.Version = v
 		default:
-			return config, fmt.Errorf("unsupported option %v", key)
+			return nil, fmt.Errorf("unsupported option %v", key)
 		}
 	}
-	if err := config.Validate(); err != nil {
-		return config, fmt.Errorf("invalid quicprelude options: %w", err)
+	if options.count < 0 {
+		return nil, fmt.Errorf("invalid quicprelude options: count must not be negative, got %d", options.count)
 	}
-	return config, nil
+
+	generator, err := newQUICPreludeGenerator(options)
+	if err != nil {
+		return nil, fmt.Errorf("invalid quicprelude options: %w", err)
+	}
+	return quicprelude.NewConfig().WithCount(options.count).WithGenerator(generator), nil
+}
+
+func newQUICPreludeGenerator(options quicPreludeOptions) (quicprelude.Generator, error) {
+	switch options.mode {
+	case "invalid-initial":
+		return quicprelude.InvalidInitial(options.version, options.length)
+	case "random":
+		return quicprelude.Random(options.length)
+	default:
+		return nil, fmt.Errorf("unknown mode %q, want invalid-initial or random", options.mode)
+	}
 }
 
 // parseQUICVersionCodepoint accepts a 32-bit wire codepoint, in hexadecimal

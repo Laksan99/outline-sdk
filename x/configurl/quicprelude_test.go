@@ -16,26 +16,85 @@ package configurl
 
 import (
 	"context"
+	"encoding/binary"
+	"errors"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"golang.getoutline.org/sdk/x/quicprelude"
 )
 
-// parsePreludeOptions parses the options of a quicprelude config.
-func parsePreludeOptions(t *testing.T, options string) (quicprelude.Config, error) {
+// recordingConn records what was written, so a test can assert on the datagrams
+// the configured prelude produced.
+type recordingConn struct {
+	writes [][]byte
+}
+
+func (c *recordingConn) ReadFrom([]byte) (int, net.Addr, error) {
+	return 0, nil, errors.New("not implemented")
+}
+
+func (c *recordingConn) WriteTo(p []byte, _ net.Addr) (int, error) {
+	c.writes = append(c.writes, append([]byte(nil), p...))
+	return len(p), nil
+}
+
+func (*recordingConn) Close() error                     { return nil }
+func (*recordingConn) LocalAddr() net.Addr              { return &net.UDPAddr{} }
+func (*recordingConn) SetDeadline(time.Time) error      { return nil }
+func (*recordingConn) SetReadDeadline(time.Time) error  { return nil }
+func (*recordingConn) SetWriteDeadline(time.Time) error { return nil }
+
+type fixedListener struct {
+	conn net.PacketConn
+}
+
+func (l *fixedListener) ListenPacket(context.Context) (net.PacketConn, error) {
+	return l.conn, nil
+}
+
+// preludesFor parses quicprelude options and returns the datagrams sent before
+// a single payload write. Asserting on the wire keeps these tests independent
+// of the package's internal representation.
+func preludesFor(t *testing.T, options string) [][]byte {
 	t.Helper()
 	config, err := ParseConfig("quicprelude:" + options)
 	require.NoError(t, err)
-	return newQUICPreludeConfigFromURL(config.URL)
+	preludeConfig, err := newQUICPreludeConfigFromURL(config.URL)
+	require.NoError(t, err)
+
+	inner := &recordingConn{}
+	listener, err := preludeConfig.NewPacketListener(&fixedListener{conn: inner})
+	require.NoError(t, err)
+	conn, err := listener.ListenPacket(t.Context())
+	require.NoError(t, err)
+
+	payload := []byte("payload")
+	_, err = conn.WriteTo(payload, &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 443})
+	require.NoError(t, err)
+
+	require.NotEmpty(t, inner.writes)
+	require.Equal(t, payload, inner.writes[len(inner.writes)-1], "the payload must be written last")
+	return inner.writes[:len(inner.writes)-1]
 }
+
+func errorFor(t *testing.T, options string) error {
+	t.Helper()
+	config, err := ParseConfig("quicprelude:" + options)
+	require.NoError(t, err)
+	_, err = newQUICPreludeConfigFromURL(config.URL)
+	return err
+}
+
+func versionOf(p []byte) uint32 { return binary.BigEndian.Uint32(p[1:5]) }
 
 func TestRegisterQUICPreludePacketListener(t *testing.T) {
 	providers := NewDefaultProviders()
 
-	pl, err := providers.NewPacketListener(context.Background(), "quicprelude:count=2&version=0x1a2a3a4a")
+	_, err := providers.NewPacketListener(context.Background(), "quicprelude:count=2&version=0x1a2a3a4a")
 	require.NoError(t, err)
-	require.IsType(t, &quicprelude.PacketListener{}, pl)
 
 	// The prelude must sit above another packet listener, which is how it shares
 	// a four-tuple with proxied traffic.
@@ -44,85 +103,64 @@ func TestRegisterQUICPreludePacketListener(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestQUICPreludeOptionsDefault(t *testing.T) {
-	config, err := parsePreludeOptions(t, "")
-	require.NoError(t, err)
-	require.Equal(t, quicprelude.NewConfig(), config)
+func TestQUICPreludeDefaults(t *testing.T) {
+	preludes := preludesFor(t, "")
+
+	require.Len(t, preludes, 1)
+	require.Len(t, preludes[0], quicprelude.DefaultLength)
+	require.Equal(t, quicprelude.DefaultVersion, versionOf(preludes[0]))
 }
 
 func TestQUICPreludeOptionCount(t *testing.T) {
-	config, err := parsePreludeOptions(t, "count=3")
-	require.NoError(t, err)
-	require.Equal(t, 3, config.Count)
+	require.Len(t, preludesFor(t, "count=3"), 3)
 
-	// Zero disables the prelude, and the other options stop mattering.
-	config, err = parsePreludeOptions(t, "count=0")
-	require.NoError(t, err)
-	require.Equal(t, 0, config.Count)
+	// Zero disables the prelude, leaving only the payload.
+	require.Empty(t, preludesFor(t, "count=0"))
 
-	_, err = parsePreludeOptions(t, "count=-1")
-	require.Error(t, err)
-
-	_, err = parsePreludeOptions(t, "count=many")
-	require.Error(t, err)
+	require.Error(t, errorFor(t, "count=-1"))
+	require.Error(t, errorFor(t, "count=many"))
 }
 
 func TestQUICPreludeOptionMode(t *testing.T) {
-	config, err := parsePreludeOptions(t, "mode=random&length=1200")
-	require.NoError(t, err)
-	require.Equal(t, quicprelude.ModeRandom, config.Mode)
+	initial := preludesFor(t, "mode=invalid-initial")
+	require.Len(t, initial, 1)
+	require.Equal(t, byte(0xc0), initial[0][0]&0xc0, "invalid-initial must be long-header shaped")
 
-	config, err = parsePreludeOptions(t, "mode=invalid-initial")
-	require.NoError(t, err)
-	require.Equal(t, quicprelude.ModeInvalidInitial, config.Mode)
+	random := preludesFor(t, "mode=random&length=1200")
+	require.Len(t, random, 1)
+	require.Len(t, random[0], 1200)
 
-	_, err = parsePreludeOptions(t, "mode=handshake")
-	require.Error(t, err)
+	require.Error(t, errorFor(t, "mode=handshake"))
 }
 
 func TestQUICPreludeOptionLength(t *testing.T) {
-	config, err := parsePreludeOptions(t, "length=1300")
-	require.NoError(t, err)
-	require.Equal(t, 1300, config.Length)
+	preludes := preludesFor(t, "length=1300")
+	require.Len(t, preludes[0], 1300)
 
 	// An Initial-shaped datagram has an RFC 9000 minimum size.
-	_, err = parsePreludeOptions(t, "length=100")
-	require.Error(t, err)
-
-	_, err = parsePreludeOptions(t, "length=big")
-	require.Error(t, err)
+	require.Error(t, errorFor(t, "length=100"))
+	require.Error(t, errorFor(t, "length=big"))
 }
 
 func TestQUICPreludeOptionVersion(t *testing.T) {
-	config, err := parsePreludeOptions(t, "version=0xdeadbeef")
-	require.NoError(t, err)
-	require.Equal(t, uint32(0xdeadbeef), config.Version)
+	require.Equal(t, uint32(0xdeadbeef), versionOf(preludesFor(t, "version=0xdeadbeef")[0]))
 
 	// The 0x prefix is optional.
-	config, err = parsePreludeOptions(t, "version=1a2a3a4a")
-	require.NoError(t, err)
-	require.Equal(t, uint32(0x1a2a3a4a), config.Version)
+	require.Equal(t, uint32(0x1a2a3a4a), versionOf(preludesFor(t, "version=1a2a3a4a")[0]))
 
-	config, err = parsePreludeOptions(t, "version=v1")
-	require.NoError(t, err)
-	require.Equal(t, quicprelude.Version1, config.Version)
+	require.Equal(t, quicprelude.Version1, versionOf(preludesFor(t, "version=v1")[0]))
 
-	config, err = parsePreludeOptions(t, "version=v2")
-	require.NoError(t, err)
-	require.Equal(t, quicprelude.Version2, config.Version)
+	v2 := preludesFor(t, "version=v2")[0]
+	require.Equal(t, quicprelude.Version2, versionOf(v2))
+	// v2 encodes Initial as 0b01, so the type bits must differ from v1's.
+	require.Equal(t, byte(0x10), v2[0]&0x30)
 
 	// Version zero denotes Version Negotiation and is not a prelude version.
-	_, err = parsePreludeOptions(t, "version=0x0")
-	require.Error(t, err)
-
-	_, err = parsePreludeOptions(t, "version=zzz")
-	require.Error(t, err)
+	require.Error(t, errorFor(t, "version=0x0"))
+	require.Error(t, errorFor(t, "version=zzz"))
 }
 
 func TestQUICPreludeRejectsUnknownAndRepeatedOptions(t *testing.T) {
-	_, err := parsePreludeOptions(t, "colour=blue")
-	require.Error(t, err)
-
-	_, err = parsePreludeOptions(t, "count=1&count=2")
-	require.Error(t, err)
+	require.Error(t, errorFor(t, "colour=blue"))
+	require.Error(t, errorFor(t, "count=1&count=2"))
 }

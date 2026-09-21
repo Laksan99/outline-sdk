@@ -21,29 +21,32 @@
 // Initial-shaped datagram they cannot decrypt yields no server name, so no
 // decision is reached and later packets on the flow are not matched against it.
 //
-// The datagrams this package sends are deliberately not valid QUIC. They carry
-// a long header with a plausible version and connection IDs, and random bytes
-// where the protected payload and authentication tag would be. A QUIC server
-// discards them.
+// A [Config] describes what to send and produces a [transport.PacketListener]:
+//
+//	config := quicprelude.NewConfig()
+//	listener, err := config.NewPacketListener(inner)
+//
+// The datagrams come from a [Generator]. [InvalidInitial] and [Random] cover
+// the cases this package was written for, and a caller who needs something else
+// supplies their own:
+//
+//	generator, err := quicprelude.InvalidInitial(quicprelude.Version2, 1280)
+//	listener, err := quicprelude.NewConfig().
+//		WithCount(2).
+//		WithGenerator(generator).
+//		NewPacketListener(inner)
+//
+// The datagrams [InvalidInitial] produces are deliberately not valid QUIC. They
+// carry a long header with a plausible version and connection IDs, and random
+// bytes where the protected payload and authentication tag would be. A QUIC
+// server discards them.
 package quicprelude
 
 import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
-)
-
-// Mode selects the kind of datagram to send.
-type Mode string
-
-const (
-	// ModeInvalidInitial sends a datagram shaped like a QUIC Initial packet whose
-	// payload cannot be decrypted. This is the default.
-	ModeInvalidInitial Mode = "invalid-initial"
-
-	// ModeRandom sends opaque random bytes, which a middlebox that parses QUIC
-	// will not recognize as QUIC at all. It is useful as a control.
-	ModeRandom Mode = "random"
+	"net"
 )
 
 const (
@@ -63,92 +66,72 @@ const (
 	DefaultVersion uint32 = 0x1a2a3a4a
 
 	// Version1 and Version2 are the wire codepoints of RFC 9000 and RFC 9369.
-	// They are accepted so a caller can compare against a real version.
 	Version1 uint32 = 0x00000001
 	Version2 uint32 = 0x6b3343cf
 
-	// headerLength is the fixed part this package emits: first byte, version,
+	// headerLength is the fixed part InvalidInitial emits: first byte, version,
 	// two 8-byte connection IDs with their lengths, a zero-length token, and a
 	// two-byte length field.
 	headerLength = 26
 
 	connectionIDLength = 8
+
+	// maxProtectedLength is the largest payload a two-byte QUIC varint can
+	// describe.
+	maxProtectedLength = 1 << 14
 )
 
-// Config describes the datagrams to send before a flow's real traffic.
-// The zero value is not usable; use [NewConfig] or set every field.
-type Config struct {
-	// Count is the number of datagrams to send. Zero disables the prelude.
-	Count int
+// Generator builds one datagram to send to dst before the flow's real traffic.
+// It is called once per datagram, so a generator that varies its output
+// produces datagrams that differ on the wire.
+//
+// Returning an error aborts the write that triggered the prelude, and the
+// caller sees that error.
+type Generator func(dst net.Addr) ([]byte, error)
 
-	// Mode selects the kind of datagram.
-	Mode Mode
-
-	// Length is the size of each datagram in bytes.
-	Length int
-
-	// Version is the wire codepoint written into the version field, used by
-	// [ModeInvalidInitial].
-	Version uint32
+// Random returns a [Generator] producing opaque random bytes. A middlebox that
+// parses QUIC will not recognize them as QUIC at all, which makes this useful
+// as a control rather than as a technique.
+func Random(length int) (Generator, error) {
+	if length <= 0 {
+		return nil, fmt.Errorf("length must be positive, got %d", length)
+	}
+	return func(net.Addr) ([]byte, error) {
+		return randomBytes(length)
+	}, nil
 }
 
-// NewConfig returns a Config with the recommended defaults: one
-// Initial-shaped datagram of [DefaultLength] bytes carrying [DefaultVersion].
-func NewConfig() Config {
-	return Config{
-		Count:   1,
-		Mode:    ModeInvalidInitial,
-		Length:  DefaultLength,
-		Version: DefaultVersion,
+// InvalidInitial returns a [Generator] producing datagrams with a syntactically
+// valid QUIC long header announcing an Initial packet, and random bytes beyond
+// it. The payload cannot be decrypted and the authentication tag will not
+// verify, so it is not a valid QUIC packet and no server acts on it.
+//
+// version is written to the wire as given. A codepoint no implementation speaks,
+// such as [DefaultVersion], is not recognized by filtering that enumerates
+// known versions.
+func InvalidInitial(version uint32, length int) (Generator, error) {
+	if version == 0 {
+		return nil, fmt.Errorf("version must not be zero, which denotes Version Negotiation")
 	}
-}
-
-// Validate reports whether the configuration can produce datagrams.
-func (c Config) Validate() error {
-	if c.Count < 0 {
-		return fmt.Errorf("count must not be negative, got %d", c.Count)
-	}
-	if c.Count == 0 {
-		return nil
-	}
-	switch c.Mode {
-	case ModeRandom:
-		if c.Length <= 0 {
-			return fmt.Errorf("length must be positive, got %d", c.Length)
-		}
-	case ModeInvalidInitial:
-		if c.Length < MinimumInitialLength {
-			return fmt.Errorf("length must be at least %d bytes for %s, got %d",
-				MinimumInitialLength, ModeInvalidInitial, c.Length)
-		}
-		if c.Length-headerLength >= 1<<14 {
-			return fmt.Errorf("length must be under %d bytes for %s, got %d",
-				headerLength+(1<<14), ModeInvalidInitial, c.Length)
-		}
-		if c.Version == 0 {
-			return fmt.Errorf("version must not be zero, which denotes Version Negotiation")
-		}
-	default:
-		return fmt.Errorf("unknown mode %q", c.Mode)
-	}
-	return nil
-}
-
-// Datagram builds one datagram according to the configuration. Each call
-// produces fresh random bytes, so repeated datagrams do not share connection
-// IDs and are not identical on the wire.
-func (c Config) Datagram() ([]byte, error) {
-	if err := c.Validate(); err != nil {
+	if err := ValidateInitialLength(length); err != nil {
 		return nil, err
 	}
-	switch c.Mode {
-	case ModeRandom:
-		return randomBytes(c.Length)
-	case ModeInvalidInitial:
-		return invalidInitial(c.Version, c.Length)
-	default:
-		return nil, fmt.Errorf("unknown mode %q", c.Mode)
+	return func(net.Addr) ([]byte, error) {
+		return invalidInitial(version, length)
+	}, nil
+}
+
+// ValidateInitialLength reports whether length can carry an Initial-shaped
+// datagram. It is exported so a caller parsing a length from configuration can
+// reject a bad value before building a [Generator].
+func ValidateInitialLength(length int) error {
+	if length < MinimumInitialLength {
+		return fmt.Errorf("length must be at least %d bytes, got %d", MinimumInitialLength, length)
 	}
+	if length-headerLength >= maxProtectedLength {
+		return fmt.Errorf("length must be under %d bytes, got %d", headerLength+maxProtectedLength, length)
+	}
+	return nil
 }
 
 func randomBytes(length int) ([]byte, error) {
@@ -159,10 +142,6 @@ func randomBytes(length int) ([]byte, error) {
 	return p, nil
 }
 
-// invalidInitial returns a datagram with a syntactically valid QUIC long header
-// announcing an Initial packet, and random bytes beyond it. The payload cannot
-// be decrypted and the authentication tag will not verify, so it is not a valid
-// QUIC packet and no server will act on it.
 func invalidInitial(version uint32, length int) ([]byte, error) {
 	p, err := randomBytes(length)
 	if err != nil {
@@ -188,7 +167,6 @@ func invalidInitial(version uint32, length int) ([]byte, error) {
 	p[23] = 0 // zero-length token
 
 	// Two-byte QUIC varint for the length of the protected remainder.
-	protectedLength := length - headerLength
-	binary.BigEndian.PutUint16(p[24:26], uint16(protectedLength)|(1<<14))
+	binary.BigEndian.PutUint16(p[24:26], uint16(length-headerLength)|(1<<14))
 	return p, nil
 }

@@ -25,7 +25,7 @@ fetch -proto h3 -quic-versions 1 -method HEAD -v \
   -transport 'quicprelude:count=1&version=0x1a2a3a4a' https://example.com/
 ```
 
-Every option may be omitted, and a bare `quicprelude:` is the configuration to
+Every option may be omitted, and a bare `quicprelude` is the configuration to
 reach for first:
 
 | Option | Default | Meaning |

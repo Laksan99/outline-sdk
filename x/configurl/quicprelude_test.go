@@ -107,6 +107,14 @@ func TestRegisterQUICPreludePacketListener(t *testing.T) {
 	_, err = providers.NewPacketListener(context.Background(),
 		"ss://ChaCha20-IETF-Poly1305:password@example.com:1234|quicprelude:count=1")
 	require.NoError(t, err)
+
+	// With no options the colon may be dropped, which is the documented form.
+	_, err = providers.NewPacketListener(context.Background(), "quicprelude")
+	require.NoError(t, err)
+
+	_, err = providers.NewPacketListener(context.Background(),
+		"ss://ChaCha20-IETF-Poly1305:password@example.com:1234|quicprelude")
+	require.NoError(t, err)
 }
 
 func TestQUICPreludeDefaults(t *testing.T) {

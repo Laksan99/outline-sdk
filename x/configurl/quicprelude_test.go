@@ -62,7 +62,16 @@ func preludesFor(t *testing.T, options string) [][]byte {
 	t.Helper()
 	// An Initial-sized payload, so length matching is exercised rather than the
 	// fallback for a packet too short to be an Initial.
-	return preludesForPacket(t, options, make([]byte, quicprelude.DefaultLength))
+	return preludesForPacket(t, options, initialPacket(quicprelude.DefaultLength))
+}
+
+// initialPacket returns a datagram of length bytes that reads as a QUIC v1
+// Initial, which is what the listener sends a prelude ahead of.
+func initialPacket(length int) []byte {
+	p := make([]byte, length)
+	p[0] = 0xc0
+	binary.BigEndian.PutUint32(p[1:5], quicprelude.Version1)
+	return p
 }
 
 func preludesForPacket(t *testing.T, options string, payload []byte) [][]byte {
@@ -120,7 +129,7 @@ func TestRegisterQUICPreludePacketListener(t *testing.T) {
 func TestQUICPreludeDefaults(t *testing.T) {
 	// By default one Initial-shaped datagram carrying the reserved codepoint,
 	// sized to match the packet it precedes.
-	payload := make([]byte, 1350)
+	payload := initialPacket(1350)
 	preludes := preludesForPacket(t, "", payload)
 
 	require.Len(t, preludes, 1)
@@ -133,7 +142,7 @@ func TestQUICPreludeDefaults(t *testing.T) {
 	require.NotEqual(t, first, second, "default version should not repeat")
 
 	// A packet too short to be an Initial falls back to a valid length.
-	preludes = preludesForPacket(t, "", make([]byte, 40))
+	preludes = preludesForPacket(t, "", initialPacket(40))
 	require.Len(t, preludes, 1)
 	require.Len(t, preludes[0], quicprelude.DefaultLength)
 }
@@ -165,7 +174,7 @@ func TestQUICPreludeOptionLength(t *testing.T) {
 	require.Len(t, preludes[0], 1300)
 
 	// "match" is the default, and can also be written explicitly.
-	payload := make([]byte, 1350)
+	payload := initialPacket(1350)
 	preludes = preludesForPacket(t, "length=match", payload)
 	require.Len(t, preludes[0], len(payload))
 	preludes = preludesForPacket(t, "length=MATCH", payload)

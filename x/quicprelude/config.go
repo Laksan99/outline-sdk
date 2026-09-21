@@ -24,12 +24,6 @@ import (
 	"golang.getoutline.org/sdk/transport"
 )
 
-// maxTrackedDestinations bounds the per-connection record of destinations that
-// have already been preluded. A long-lived connection that exceeds it starts
-// over, which resends a prelude to a destination already seen. That is wasteful
-// but harmless, and it keeps memory bounded.
-const maxTrackedDestinations = 1024
-
 // Config describes the datagrams to send ahead of a flow's real traffic, and
 // produces the listener that sends them. Its zero value sends nothing.
 //
@@ -62,7 +56,8 @@ func (c *Config) WithGenerator(generator Generator) *Config {
 }
 
 // NewPacketListener returns a [transport.PacketListener] whose connections send
-// the configured prelude before the first datagram to each destination.
+// the configured prelude before every datagram that may carry a QUIC
+// ClientHello, and pass everything else through unchanged.
 //
 // The prelude is written to the same connection as the traffic that follows,
 // so both share a four-tuple by construction. That is the property the
@@ -88,65 +83,48 @@ func (l *packetListener) ListenPacket(ctx context.Context) (net.PacketConn, erro
 	if err != nil {
 		return nil, err
 	}
-	return &preludeConn{
-		PacketConn: conn,
-		generator:  l.generator,
-		seen:       make(map[string]bool),
-	}, nil
+	return &preludeConn{PacketConn: conn, generator: l.generator}, nil
 }
 
-// preludeConn sends the prelude before the first datagram to each destination.
-// Everything else is delegated to the embedded [net.PacketConn].
+// preludeConn sends the prelude before every datagram that may carry a QUIC
+// ClientHello. Everything else is delegated to the embedded [net.PacketConn].
+//
+// It keeps no record of destinations. Deciding from the packet alone means a new
+// connection on a reused socket gets a prelude like the first one did, including
+// one made after a middlebox has forgotten the flow, and that traffic which is
+// not QUIC never gets one. The cost is a prelude before each retransmitted or
+// resent ClientHello, which is also when a lost prelude most needs replacing,
+// and before some Initials that only acknowledge the server's. See
+// [mayCarryClientHello] for which datagrams qualify.
 type preludeConn struct {
 	net.PacketConn
 
 	generator Generator
 
-	mu   sync.Mutex
-	seen map[string]bool
+	// mu keeps a prelude adjacent to the packet it precedes when several
+	// goroutines write ClientHellos at once, and means a Generator is never called
+	// concurrently.
+	mu sync.Mutex
 }
 
-// WriteTo sends the prelude datagrams if this is the first write to addr, then
-// writes p. The prelude is sent while holding the lock so that a concurrent
-// write to the same destination cannot overtake it.
+// WriteTo sends the prelude datagrams if p may carry a ClientHello, then writes
+// p.
 func (c *preludeConn) WriteTo(p []byte, addr net.Addr) (int, error) {
-	if err := c.sendPreludeOnce(p, addr); err != nil {
-		return 0, err
+	if !mayCarryClientHello(p) {
+		return c.PacketConn.WriteTo(p, addr)
 	}
-	return c.PacketConn.WriteTo(p, addr)
-}
-
-func (c *preludeConn) sendPreludeOnce(packet []byte, addr net.Addr) error {
-	key := addr.String()
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.seen[key] {
-		return nil
-	}
 
-	datagrams, err := c.generator(GeneratorInput{Packet: packet, Destination: addr})
+	datagrams, err := c.generator(GeneratorInput{Packet: p, Destination: addr})
 	if err != nil {
-		return fmt.Errorf("quicprelude: build prelude: %w", err)
+		return 0, fmt.Errorf("quicprelude: build prelude: %w", err)
 	}
-	if len(datagrams) == 0 {
-		// The generator declined. Leave the destination unmarked so it is asked
-		// again, rather than locking out a QUIC flow because an unrelated
-		// datagram happened to go first.
-		return nil
-	}
-
 	for i, datagram := range datagrams {
 		if _, err := c.PacketConn.WriteTo(datagram, addr); err != nil {
-			return fmt.Errorf("quicprelude: send datagram %d: %w", i+1, err)
+			return 0, fmt.Errorf("quicprelude: send datagram %d: %w", i+1, err)
 		}
 	}
-
-	if len(c.seen) >= maxTrackedDestinations {
-		clear(c.seen)
-	}
-	// Recorded only after every datagram is sent, so a failed attempt is retried
-	// rather than silently skipped on the next write.
-	c.seen[key] = true
-	return nil
+	return c.PacketConn.WriteTo(p, addr)
 }

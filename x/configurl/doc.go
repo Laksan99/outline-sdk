@@ -137,10 +137,11 @@ For more details, refer to [golang.getoutline.org/sdk/transport/tlsfrag].
 
 QUIC prelude (packet listeners only, package [golang.getoutline.org/sdk/x/quicprelude])
 
-Sends datagrams to each destination before the first real packet, on the same
-socket and therefore the same four-tuple. A middlebox that reads the TLS Server
-Name Indication from the first QUIC Initial it can parse on a flow, and caches
-that verdict for the flow, finds no name in an Initial it cannot decrypt.
+Sends datagrams ahead of every packet that may carry a QUIC ClientHello, on the
+same socket and therefore the same four-tuple. Other traffic passes unchanged. A
+middlebox that reads the TLS Server Name Indication from the first QUIC Initial
+it can parse on a flow, and caches that verdict for the flow, finds no name in
+an Initial it cannot decrypt.
 
 	quicprelude:count=[COUNT]&mode=[MODE]&length=[LENGTH]&version=[VERSION]
 

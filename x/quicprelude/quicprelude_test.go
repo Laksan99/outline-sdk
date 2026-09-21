@@ -259,7 +259,7 @@ func TestNewConfigDefaults(t *testing.T) {
 	conn, err := listener.ListenPacket(t.Context())
 	require.NoError(t, err)
 
-	_, err = conn.WriteTo(make([]byte, DefaultLength), udpAddr(t, "192.0.2.1:443"))
+	_, err = conn.WriteTo(clientInitial(DefaultLength), udpAddr(t, "192.0.2.1:443"))
 	require.NoError(t, err)
 
 	// One Initial-shaped datagram sized to match the packet it preceded, and

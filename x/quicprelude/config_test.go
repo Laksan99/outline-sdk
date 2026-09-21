@@ -67,12 +67,13 @@ func (c *recordingConn) setWriteErr(err error) {
 	c.writeErr = err
 }
 
-// countPreludes counts datagrams of the configured prelude length.
-func (c *recordingConn) countPreludes(length int) int {
+// countPreludes counts datagrams carrying a reserved version, which the
+// generators under test use and the traffic they precede never does.
+func (c *recordingConn) countPreludes() int {
 	writes, _ := c.snapshot()
 	n := 0
 	for _, w := range writes {
-		if len(w) == length {
+		if version, ok := longHeaderVersion(w); ok && isReservedVersion(version) {
 			n++
 		}
 	}
@@ -112,15 +113,14 @@ func udpAddr(t *testing.T, address string) net.Addr {
 	return addr
 }
 
-func TestPreludePrecedesFirstWrite(t *testing.T) {
+func TestPreludePrecedesClientHello(t *testing.T) {
 	repeated, err := Repeat(3, mustDefaultGenerator(t))
 	require.NoError(t, err)
 	conn, inner := newTestConn(t, NewConfig().WithGenerator(repeated))
 
-	// A realistic Initial-sized payload, so the default generator's length
-	// matching is exercised rather than its fallback.
-	payload := make([]byte, DefaultLength)
-	copy(payload, "real traffic")
+	// A realistic Initial size, so the default generator's length matching is
+	// exercised rather than its fallback.
+	payload := clientInitial(1350)
 	_, err = conn.WriteTo(payload, udpAddr(t, "192.0.2.1:443"))
 	require.NoError(t, err)
 
@@ -135,40 +135,40 @@ func TestPreludePrecedesFirstWrite(t *testing.T) {
 	require.Equal(t, payload, writes[3])
 }
 
-func TestPreludeSentOncePerDestination(t *testing.T) {
+func TestPreludeSentForEveryClientHello(t *testing.T) {
+	// Retransmissions, and new connections on the same socket, repeat the
+	// ClientHello to the same destination. Each gets its own prelude, so a
+	// connection made after a middlebox has forgotten the flow is still covered.
 	conn, inner := newTestConn(t, NewConfig())
 	destination := udpAddr(t, "192.0.2.1:443")
 
-	for range 5 {
-		_, err := conn.WriteTo([]byte("x"), destination)
+	for range 3 {
+		_, err := conn.WriteTo(clientInitial(1200), destination)
 		require.NoError(t, err)
 	}
 
 	writes, _ := inner.snapshot()
-	require.Len(t, writes, 6, "expected 1 prelude followed by 5 payloads")
-	require.Equal(t, 1, inner.countPreludes(DefaultLength))
+	require.Len(t, writes, 6, "expected a prelude before each of 3 Initials")
+	require.Equal(t, 3, inner.countPreludes())
 }
 
-func TestPreludeSentForEachDestination(t *testing.T) {
+func TestPreludeSkipsPacketsWithoutClientHello(t *testing.T) {
 	conn, inner := newTestConn(t, NewConfig())
+	destination := udpAddr(t, "192.0.2.1:443")
 
-	// The third write repeats the first destination and must not prelude again.
-	for _, address := range []string{"192.0.2.1:443", "192.0.2.2:443", "192.0.2.1:443"} {
-		_, err := conn.WriteTo([]byte("x"), udpAddr(t, address))
+	for _, packet := range [][]byte{
+		{0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0},                                  // a DNS query
+		coalesce(longPacket(v1Initial, Version1, 100), longPacket(v1Handshake, Version1, 1000)), // the client's second flight
+		longPacket(v1Handshake, Version1, 1000),
+		append([]byte{0x40}, make([]byte, 100)...), // short header
+	} {
+		_, err := conn.WriteTo(packet, destination)
 		require.NoError(t, err)
 	}
 
-	writes, addrs := inner.snapshot()
-	require.Len(t, writes, 5, "expected a prelude for each of 2 destinations plus 3 payloads")
-
-	preludesPerAddr := map[string]int{}
-	for i, w := range writes {
-		if len(w) == DefaultLength {
-			preludesPerAddr[addrs[i]]++
-		}
-	}
-	require.Equal(t, 1, preludesPerAddr["192.0.2.1:443"])
-	require.Equal(t, 1, preludesPerAddr["192.0.2.2:443"])
+	writes, _ := inner.snapshot()
+	require.Len(t, writes, 4, "every packet should pass through alone")
+	require.Zero(t, inner.countPreludes())
 }
 
 func TestPreludeRetriedAfterWriteFailure(t *testing.T) {
@@ -176,40 +176,38 @@ func TestPreludeRetriedAfterWriteFailure(t *testing.T) {
 	destination := udpAddr(t, "192.0.2.1:443")
 	inner.setWriteErr(errors.New("network down"))
 
-	_, err := conn.WriteTo([]byte("x"), destination)
+	_, err := conn.WriteTo(clientInitial(1200), destination)
 	require.Error(t, err)
 
-	// The destination must not be recorded as done while the prelude failed,
-	// otherwise the real traffic would later go out with no prelude at all.
+	// The client retransmits the Initial, which must get the prelude that failed.
 	inner.setWriteErr(nil)
-	_, err = conn.WriteTo([]byte("x"), destination)
+	_, err = conn.WriteTo(clientInitial(1200), destination)
 	require.NoError(t, err)
 
 	writes, _ := inner.snapshot()
-	require.Len(t, writes, 2, "expected the prelude to be retried, then the payload")
-	require.Len(t, writes[0], DefaultLength)
+	require.Len(t, writes, 2, "expected the prelude, then the payload")
+	require.Equal(t, 1, inner.countPreludes())
 }
 
-func TestDecliningGeneratorSendsNothingAndKeepsAsking(t *testing.T) {
-	// A generator that only preludes QUIC long headers must not be locked out by
-	// an unrelated datagram, such as a DNS query, going to the same destination
-	// first.
+func TestDecliningGeneratorSendsPacketAlone(t *testing.T) {
+	declined := true
 	conn, inner := newTestConn(t, NewConfig().WithGenerator(
-		func(input GeneratorInput) ([][]byte, error) {
-			if len(input.Packet) == 0 || input.Packet[0]&0x80 == 0 {
+		func(GeneratorInput) ([][]byte, error) {
+			if declined {
 				return nil, nil
 			}
 			return [][]byte{[]byte("prelude")}, nil
 		}))
 	destination := udpAddr(t, "192.0.2.1:443")
 
-	_, err := conn.WriteTo([]byte{0x00, 0x01}, destination)
+	_, err := conn.WriteTo(clientInitial(1200), destination)
 	require.NoError(t, err)
 	writes, _ := inner.snapshot()
 	require.Len(t, writes, 1, "a declined prelude sends the payload alone")
 
-	// The long-header packet still gets its prelude.
-	_, err = conn.WriteTo([]byte{0xc0, 0x02}, destination)
+	// Having declined once does not stop the generator being asked again.
+	declined = false
+	_, err = conn.WriteTo(clientInitial(1200), destination)
 	require.NoError(t, err)
 	writes, _ = inner.snapshot()
 	require.Len(t, writes, 3)
@@ -239,9 +237,9 @@ func TestListenersDoNotSeeLaterConfigChanges(t *testing.T) {
 
 	conn, err := listener.ListenPacket(context.Background())
 	require.NoError(t, err)
-	_, err = conn.WriteTo([]byte("x"), udpAddr(t, "192.0.2.1:443"))
+	_, err = conn.WriteTo(clientInitial(1200), udpAddr(t, "192.0.2.1:443"))
 	require.NoError(t, err)
-	require.Equal(t, 1, inner.countPreludes(DefaultLength))
+	require.Equal(t, 1, inner.countPreludes())
 }
 
 func TestGeneratorReceivesDestinationAndErrorsPropagate(t *testing.T) {
@@ -260,11 +258,12 @@ func TestGeneratorReceivesDestinationAndErrorsPropagate(t *testing.T) {
 	require.NoError(t, err)
 
 	destination := udpAddr(t, "192.0.2.1:443")
-	_, err = conn.WriteTo([]byte("payload"), destination)
+	payload := clientInitial(1200)
+	_, err = conn.WriteTo(payload, destination)
 	require.NoError(t, err)
 
 	require.Equal(t, destination.String(), gotDst.String(), "the generator is told where the datagram goes")
-	require.Equal(t, []byte("payload"), gotPacket, "the generator is given the packet it precedes")
+	require.Equal(t, payload, gotPacket, "the generator is given the packet it precedes")
 	writes, _ := inner.snapshot()
 	require.Len(t, writes, 2)
 	require.Equal(t, []byte("custom prelude"), writes[0])
@@ -276,24 +275,33 @@ func TestGeneratorReceivesDestinationAndErrorsPropagate(t *testing.T) {
 	require.NoError(t, err)
 	conn, err = failing.ListenPacket(context.Background())
 	require.NoError(t, err)
-	_, err = conn.WriteTo([]byte("payload"), destination)
+	_, err = conn.WriteTo(payload, destination)
 	require.ErrorContains(t, err, "no datagram")
 }
 
-func TestConcurrentWritesSendOnePrelude(t *testing.T) {
+func TestConcurrentClientHellosEachGetAdjacentPrelude(t *testing.T) {
 	conn, inner := newTestConn(t, NewConfig())
 	destination := udpAddr(t, "192.0.2.1:443")
 
+	const writers = 16
 	var wg sync.WaitGroup
-	for range 16 {
+	for range writers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := conn.WriteTo([]byte("x"), destination)
+			_, err := conn.WriteTo(clientInitial(1200), destination)
 			require.NoError(t, err)
 		}()
 	}
 	wg.Wait()
 
-	require.Equal(t, 1, inner.countPreludes(DefaultLength), "racing writes must not each send a prelude")
+	writes, _ := inner.snapshot()
+	require.Len(t, writes, 2*writers)
+	// Racing writers must not separate a prelude from the Initial it precedes.
+	for i := 0; i < len(writes); i += 2 {
+		version, _ := longHeaderVersion(writes[i])
+		require.True(t, isReservedVersion(version), "write %d should be a prelude", i)
+		version, _ = longHeaderVersion(writes[i+1])
+		require.Equal(t, Version1, version, "write %d should be the Initial", i+1)
+	}
 }

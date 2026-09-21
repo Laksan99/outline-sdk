@@ -17,8 +17,8 @@ while allowing fallback through version negotiation.
 
 Preludes are configured through `-transport`, not through dedicated flags, so
 they compose with the rest of the transport stack. The `quicprelude` type sends
-datagrams to each destination before the first real packet, on the same socket
-and therefore the same four-tuple:
+datagrams ahead of every packet that may carry a QUIC ClientHello, on the same
+socket and therefore the same four-tuple:
 
 ```console
 fetch -proto h3 -quic-versions 1 -method HEAD -v \

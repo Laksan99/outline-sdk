@@ -21,6 +21,11 @@
 // Initial-shaped datagram they cannot decrypt yields no server name, so no
 // decision is reached and later packets on the flow are not matched against it.
 //
+// A prelude goes before every datagram that may carry a QUIC ClientHello, judged
+// from the packet header alone, rather than once per destination. Nothing is
+// remembered between writes, so a new connection on a reused socket is covered
+// like the first, and traffic that is not QUIC passes untouched.
+//
 // A [Config] describes what to send and produces a [transport.PacketListener]:
 //
 //	config := quicprelude.NewConfig()
@@ -130,10 +135,10 @@ type GeneratorInput struct {
 // input. Being given the packet lets a generator match its length, read the
 // Server Name Indication out of an Initial, or decline.
 //
-// Returning no datagrams sends the packet unchanged, and leaves the destination
-// unmarked, so a generator that is waiting for a QUIC Initial is consulted
-// again on the next datagram to that destination rather than being locked out
-// by an unrelated first packet.
+// A generator is consulted only for datagrams that may carry a QUIC ClientHello,
+// which includes retransmissions and the resends that follow a Retry, a TLS
+// HelloRetryRequest, or Version Negotiation. Calls on one connection are never
+// concurrent. Returning no datagrams sends the packet unchanged.
 //
 // Returning an error aborts the write, and the caller sees that error.
 type Generator func(input GeneratorInput) ([][]byte, error)

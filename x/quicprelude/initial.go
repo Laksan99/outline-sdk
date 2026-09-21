@@ -48,13 +48,27 @@ const (
 // Initial, which therefore gets a prelude it does not need: one extra datagram
 // per handshake. With Go 1.25's default post-quantum key share the ClientHello
 // also spans two Initials, so a handshake sends three preludes, two of them
-// useful. The rule errs only in that direction. A malformed Initial is preluded,
-// never skipped.
+// useful. Past the length check below, the rule errs only in that direction: an
+// Initial whose header does not parse is preluded, never skipped.
+//
+// Datagrams shorter than [MinimumInitialLength] are skipped first. RFC 9000
+// section 14.1 requires a client to pad every datagram carrying an Initial to
+// at least that size, so no compliant client sends a ClientHello in a shorter
+// one. The check matters because the header test alone is loose: any datagram
+// whose first byte has the top bit set passes as a long header, and its next
+// four bytes are read as a version. A DNS query sent without Recursion Desired,
+// with a transaction ID ending in 0xff, reads as a draft-range Initial one time
+// in eight, and nothing after it looks like a Handshake packet, which would
+// earn it a prelude. DNS queries, like most traffic that is not QUIC, are far
+// shorter than 1200 bytes.
 //
 // Packets that are not a client Initial of a version this recognizes are
 // skipped. That includes everything that is not QUIC, such as a DNS query on
 // the same socket.
 func mayCarryClientHello(p []byte) bool {
+	if len(p) < MinimumInitialLength {
+		return false
+	}
 	version, ok := longHeaderVersion(p)
 	if !ok {
 		return false

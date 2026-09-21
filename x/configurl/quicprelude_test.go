@@ -60,8 +60,7 @@ func (l *fixedListener) ListenPacket(context.Context) (net.PacketConn, error) {
 // of the package's internal representation.
 func preludesFor(t *testing.T, options string) [][]byte {
 	t.Helper()
-	// An Initial-sized payload, so length matching is exercised rather than the
-	// fallback for a packet too short to be an Initial.
+	// An Initial-sized payload, since shorter packets get no prelude.
 	return preludesForPacket(t, options, initialPacket(quicprelude.DefaultLength))
 }
 
@@ -141,10 +140,8 @@ func TestQUICPreludeDefaults(t *testing.T) {
 	second := versionOf(preludesForPacket(t, "", payload)[0])
 	require.NotEqual(t, first, second, "default version should not repeat")
 
-	// A packet too short to be an Initial falls back to a valid length.
-	preludes = preludesForPacket(t, "", initialPacket(40))
-	require.Len(t, preludes, 1)
-	require.Len(t, preludes[0], quicprelude.DefaultLength)
+	// A packet shorter than RFC 9000 allows a client Initial gets no prelude.
+	require.Empty(t, preludesForPacket(t, "", initialPacket(quicprelude.MinimumInitialLength-1)))
 }
 
 func TestQUICPreludeOptionCount(t *testing.T) {

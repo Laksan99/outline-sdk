@@ -157,10 +157,10 @@ func TestPreludeSkipsPacketsWithoutClientHello(t *testing.T) {
 	destination := udpAddr(t, "192.0.2.1:443")
 
 	for _, packet := range [][]byte{
-		{0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0},                                  // a DNS query
-		coalesce(longPacket(v1Initial, Version1, 100), longPacket(v1Handshake, Version1, 1000)), // the client's second flight
-		longPacket(v1Handshake, Version1, 1000),
-		append([]byte{0x40}, make([]byte, 100)...), // short header
+		dnsQuery(0x80ff, 0x0000), // reads as a draft Initial, but is too short to be one
+		coalesce(longPacket(v1Initial, Version1, 100), longPacket(v1Handshake, Version1, 1100)), // the client's second flight
+		longPacket(v1Handshake, Version1, 1200),
+		append([]byte{0x40}, make([]byte, 1200)...), // short header
 	} {
 		_, err := conn.WriteTo(packet, destination)
 		require.NoError(t, err)

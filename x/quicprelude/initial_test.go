@@ -35,7 +35,7 @@ const (
 
 // longPacket builds a long-header packet with 8-byte connection IDs and
 // payloadLength zero bytes. Only Initial packets carry a token field, and it is
-// left empty.
+// left empty, so an Initial's header is initialHeaderLength bytes.
 func longPacket(firstByte byte, version uint32, payloadLength int) []byte {
 	p := []byte{firstByte, 0, 0, 0, 0}
 	binary.BigEndian.PutUint32(p[1:5], version)
@@ -50,10 +50,22 @@ func longPacket(firstByte byte, version uint32, payloadLength int) []byte {
 	return append(p, make([]byte, payloadLength)...)
 }
 
+const initialHeaderLength = 26
+
 // clientInitial builds a datagram of length bytes holding one v1 Initial, as a
 // client's first flight would.
 func clientInitial(length int) []byte {
-	return longPacket(v1Initial, Version1, length-28)
+	return longPacket(v1Initial, Version1, length-initialHeaderLength)
+}
+
+// dnsQuery builds a DNS query for example.com with the given transaction ID and
+// flags, with an EDNS OPT record as most resolvers send.
+func dnsQuery(id, flags uint16) []byte {
+	p := binary.BigEndian.AppendUint16(nil, id)
+	p = binary.BigEndian.AppendUint16(p, flags)
+	p = append(p, 0, 1, 0, 0, 0, 0, 0, 1) // one question, one additional record
+	p = append(p, 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0, 1, 0, 1)
+	return append(p, 0, 0, 41, 0x04, 0xd0, 0, 0, 0, 0, 0, 0) // OPT, 1232-byte UDP payload
 }
 
 func coalesce(packets ...[]byte) []byte {
@@ -70,35 +82,40 @@ func TestMayCarryClientHello(t *testing.T) {
 		packet []byte
 		want   bool
 	}{
-		// Datagrams that may carry a ClientHello.
+		// Datagrams that may carry a ClientHello. All are at least
+		// MinimumInitialLength, so the other checks are what they test.
 		{"v1 Initial", clientInitial(1200), true},
-		{"v2 Initial", longPacket(v2Initial, Version2, 1172), true},
-		{"draft-29 Initial", longPacket(v1Initial, 0xff00001d, 1172), true},
-		{"Initial with padding after it", append(longPacket(v1Initial, Version1, 900), make([]byte, 272)...), true},
-		{"Initial coalesced with 0-RTT", coalesce(longPacket(v1Initial, Version1, 1000), longPacket(v1ZeroRTT, Version1, 100)), true},
-		{"v2 Initial coalesced with 0-RTT", coalesce(longPacket(v2Initial, Version2, 1000), longPacket(v2ZeroRTT, Version2, 100)), true},
-		{"Initial followed by another version's Handshake", coalesce(longPacket(v1Initial, Version1, 1000), longPacket(v2Handshake, Version2, 100)), true},
-		{"Initial with a Fixed Bit greased to zero", longPacket(0x80, Version1, 1172), true},
-		{"Initial whose length overruns the datagram", longPacket(v1Initial, Version1, 1172)[:600], true},
-		{"Initial truncated inside its header", longPacket(v1Initial, Version1, 1172)[:10], true},
+		{"v2 Initial", longPacket(v2Initial, Version2, 1200), true},
+		{"draft-29 Initial", longPacket(v1Initial, 0xff00001d, 1200), true},
+		{"Initial with padding after it", append(longPacket(v1Initial, Version1, 900), make([]byte, 300)...), true},
+		{"Initial coalesced with 0-RTT", coalesce(longPacket(v1Initial, Version1, 1100), longPacket(v1ZeroRTT, Version1, 100)), true},
+		{"v2 Initial coalesced with 0-RTT", coalesce(longPacket(v2Initial, Version2, 1100), longPacket(v2ZeroRTT, Version2, 100)), true},
+		{"Initial followed by another version's Handshake", coalesce(longPacket(v1Initial, Version1, 1100), longPacket(v2Handshake, Version2, 100)), true},
+		{"Initial with a Fixed Bit greased to zero", longPacket(0x80, Version1, 1200), true},
+		{"Initial whose length overruns the datagram", longPacket(v1Initial, Version1, 1500)[:1250], true},
 
 		// Initials that only acknowledge the server's, coalesced with Handshake.
-		{"v1 Initial coalesced with Handshake", coalesce(longPacket(v1Initial, Version1, 100), longPacket(v1Handshake, Version1, 1000)), false},
-		{"v2 Initial coalesced with Handshake", coalesce(longPacket(v2Initial, Version2, 100), longPacket(v2Handshake, Version2, 1000)), false},
+		{"v1 Initial coalesced with Handshake", coalesce(longPacket(v1Initial, Version1, 100), longPacket(v1Handshake, Version1, 1100)), false},
+		{"v2 Initial coalesced with Handshake", coalesce(longPacket(v2Initial, Version2, 100), longPacket(v2Handshake, Version2, 1100)), false},
+
+		// Datagrams too short to carry an Initial under RFC 9000 section 14.1.
+		{"v1 Initial one byte short", clientInitial(MinimumInitialLength - 1), false},
+		{"Initial truncated inside its header", clientInitial(1200)[:10], false},
+		{"DNS query that reads as a draft Initial", dnsQuery(0x80ff, 0x0000), false},
 
 		// Everything else.
 		{"empty", nil, false},
-		{"short header", append([]byte{0x40}, make([]byte, 40)...), false},
-		{"DNS query", []byte{0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}, false},
+		{"short header", append([]byte{0x40}, make([]byte, 1200)...), false},
+		{"recursive DNS query", dnsQuery(0x1234, 0x0100), false},
 		{"long header shorter than a version", []byte{0xc0, 0, 0}, false},
-		{"v1 Handshake", longPacket(v1Handshake, Version1, 1000), false},
-		{"v1 0-RTT", longPacket(v1ZeroRTT, Version1, 1000), false},
-		{"v1 Retry bits", longPacket(v1Retry, Version1, 100), false},
-		{"v2 Retry bits, the v1 Initial layout", longPacket(v2Retry, Version2, 1172), false},
-		{"v2 Handshake", longPacket(v2Handshake, Version2, 1000), false},
-		{"Version Negotiation", longPacket(0x80, 0, 100), false},
-		{"reserved version", longPacket(v1Initial, exampleReserved, 1172), false},
-		{"unknown version", longPacket(v1Initial, 0xdeadbeef, 1172), false},
+		{"v1 Handshake", longPacket(v1Handshake, Version1, 1200), false},
+		{"v1 0-RTT", longPacket(v1ZeroRTT, Version1, 1200), false},
+		{"v1 Retry bits", longPacket(v1Retry, Version1, 1200), false},
+		{"v2 Retry bits, the v1 Initial layout", longPacket(v2Retry, Version2, 1200), false},
+		{"v2 Handshake", longPacket(v2Handshake, Version2, 1200), false},
+		{"Version Negotiation", longPacket(0x80, 0, 1200), false},
+		{"reserved version", longPacket(v1Initial, exampleReserved, 1200), false},
+		{"unknown version", longPacket(v1Initial, 0xdeadbeef, 1200), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want, mayCarryClientHello(tc.packet))

@@ -155,8 +155,9 @@ match the packet it precedes.
 	version  reserved, draft, v1, v2, or a 32-bit hex codepoint (default reserved)
 
 length=match sizes each datagram like the packet it precedes, so the prelude is
-not separable from it by size. With mode=invalid-initial, a packet too short to
-carry an Initial falls back to a valid length; mode=random always matches.
+not separable from it by size. Only datagrams of at least 1200 bytes, the
+smallest RFC 9000 allows a client to send an Initial in, get a prelude, so a
+matched prelude is always a valid Initial size.
 
 version names a range to draw a fresh codepoint from for every datagram, so no
 single constant identifies the prelude. reserved uses 0x?a?a?a?a, which RFC 9000

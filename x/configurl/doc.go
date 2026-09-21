@@ -151,17 +151,21 @@ match the packet it precedes.
 	count    number of datagrams; 0 disables the prelude (default 1)
 	mode     invalid-initial or random (default invalid-initial)
 	length   match, or a byte count (default match)
-	version  random, reserved, v1, v2, or a 32-bit hex codepoint (default random)
+	version  reserved, draft, v1, v2, or a 32-bit hex codepoint (default reserved)
 
 length=match sizes each datagram like the packet it precedes, so the prelude is
 not separable from it by size. A packet too short to carry an Initial falls back
 to a valid length.
 
-version=random chooses a fresh codepoint from the range RFC 9000 reserves for
-forcing version negotiation, 0x?a?a?a?a, for every datagram, so no single
-constant identifies the prelude. The range matters: measurements found that a
-codepoint no implementation would recognize is ignored rather than acted on,
-which defeats the technique.
+version names a range to draw a fresh codepoint from for every datagram, so no
+single constant identifies the prelude. reserved uses 0x?a?a?a?a, which RFC 9000
+sets aside for forcing version negotiation; draft uses the IETF draft range
+above the draft numbers that were ever assigned.
+
+The range matters: measurements found that a codepoint no implementation would
+recognize is ignored rather than acted on, which defeats the technique. An
+assigned draft such as draft-29 is worse still, being dropped outright on the
+Iranian paths measured, which is why draft selection stays above them.
 
 Packet reordering (streams only, package [golang.getoutline.org/sdk/x/disorder])
 

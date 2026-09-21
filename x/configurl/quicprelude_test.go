@@ -173,18 +173,28 @@ func TestQUICPreludeOptionLength(t *testing.T) {
 	require.Error(t, errorFor(t, "length=-1"))
 }
 
-func TestQUICPreludeOptionVersionNames(t *testing.T) {
-	require.Equal(t, quicprelude.ReservedVersion, versionOf(preludesFor(t, "version=reserved")[0]))
-	// "greased" is the widely used name for the same range.
-	require.Equal(t, quicprelude.ReservedVersion, versionOf(preludesFor(t, "version=greased")[0]))
-
-	// "random" is the default and can be written explicitly.
-	first := versionOf(preludesFor(t, "version=random")[0])
-	second := versionOf(preludesFor(t, "version=random")[0])
+func TestQUICPreludeVersionRanges(t *testing.T) {
+	// "reserved" is the default and can also be written explicitly. Each
+	// datagram draws a fresh codepoint, so nothing fixed identifies a prelude.
+	first := versionOf(preludesFor(t, "version=reserved")[0])
+	second := versionOf(preludesFor(t, "version=reserved")[0])
 	require.NotEqual(t, first, second)
+	for _, version := range []uint32{first, second} {
+		require.Equal(t, uint32(0x0a0a0a0a), version&0x0f0f0f0f, "%#08x is outside 0x?a?a?a?a", version)
+	}
 
-	// Zero is not a spelling of "random"; it denotes Version Negotiation.
+	// "draft" draws from the IETF draft range, above the assigned draft numbers
+	// that filtering recognizes.
+	for range 4 {
+		version := versionOf(preludesFor(t, "version=draft")[0])
+		require.Equal(t, uint32(0xff000000), version&0xffffff00, "%#08x is outside the draft range", version)
+		require.Greater(t, version&0xff, uint32(34), "%#08x is an assigned draft", version)
+	}
+
+	// Zero denotes Version Negotiation and is not a spelling of a range.
 	require.Error(t, errorFor(t, "version=0x0"))
+	// The old synonym is gone, so it must not silently succeed.
+	require.Error(t, errorFor(t, "version=greased"))
 }
 
 func TestQUICPreludeOptionVersion(t *testing.T) {

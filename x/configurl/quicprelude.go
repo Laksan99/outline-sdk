@@ -45,7 +45,7 @@ type quicPreludeOptions struct {
 	count   int
 	mode    string
 	length  int
-	version uint32
+	version quicprelude.VersionSource
 }
 
 func newQUICPreludeConfigFromURL(configURL url.URL) (*quicprelude.Config, error) {
@@ -53,7 +53,7 @@ func newQUICPreludeConfigFromURL(configURL url.URL) (*quicprelude.Config, error)
 		count:   1,
 		mode:    "invalid-initial",
 		length:  quicprelude.MatchPacketLength,
-		version: quicprelude.RandomVersion,
+		version: quicprelude.RandomReservedVersion(),
 	}
 
 	values, err := url.ParseQuery(configURL.Opaque)
@@ -77,7 +77,7 @@ func newQUICPreludeConfigFromURL(configURL url.URL) (*quicprelude.Config, error)
 				return nil, err
 			}
 		case "version":
-			if options.version, err = parseQUICVersionCodepoint(value); err != nil {
+			if options.version, err = parseQUICVersionSource(value); err != nil {
 				return nil, err
 			}
 		default:
@@ -124,29 +124,27 @@ func parseQUICPreludeLength(value string) (int, error) {
 	return length, nil
 }
 
-// parseQUICVersionCodepoint accepts "random", the default, which chooses a
-// fresh codepoint per datagram from the reserved range; "reserved" for a fixed
-// codepoint from it; the names "v1" and "v2"; or a 32-bit hex codepoint.
-// "greased" is accepted as a synonym for "reserved", since the pattern is
-// widely called that by analogy with TLS, though RFC 9000 calls it reserved.
-func parseQUICVersionCodepoint(value string) (uint32, error) {
+// parseQUICVersionSource accepts the name of a range to draw a fresh codepoint
+// from for every datagram, "reserved" (the default) or "draft"; the names "v1"
+// and "v2"; or a 32-bit hex codepoint to use verbatim.
+func parseQUICVersionSource(value string) (quicprelude.VersionSource, error) {
 	switch strings.ToLower(value) {
-	case "random":
-		return quicprelude.RandomVersion, nil
-	case "reserved", "greased":
-		return quicprelude.ReservedVersion, nil
+	case "reserved":
+		return quicprelude.RandomReservedVersion(), nil
+	case "draft":
+		return quicprelude.RandomDraftVersion(), nil
 	case "v1":
-		return quicprelude.Version1, nil
+		return quicprelude.FixedVersion(quicprelude.Version1)
 	case "v2":
-		return quicprelude.Version2, nil
+		return quicprelude.FixedVersion(quicprelude.Version2)
 	}
 	trimmed := strings.TrimPrefix(strings.TrimPrefix(value, "0x"), "0X")
 	v, err := strconv.ParseUint(trimmed, 16, 32)
 	if err != nil {
-		return 0, fmt.Errorf("invalid version %q: want \"random\", \"reserved\", v1, v2, or a 32-bit hex codepoint", value)
+		return nil, fmt.Errorf("invalid version %q: want \"reserved\", \"draft\", v1, v2, or a 32-bit hex codepoint", value)
 	}
 	if v == 0 {
-		return 0, fmt.Errorf("invalid version 0x0, which denotes Version Negotiation: use \"random\" for a fresh codepoint per datagram")
+		return nil, fmt.Errorf("invalid version 0x0, which denotes Version Negotiation: use \"reserved\" for a fresh codepoint per datagram")
 	}
-	return uint32(v), nil
+	return quicprelude.FixedVersion(uint32(v))
 }

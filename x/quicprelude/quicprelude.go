@@ -73,36 +73,6 @@ const (
 	// datagram size alone.
 	DefaultLength = 1280
 
-	// RandomVersion asks a generator to choose a fresh codepoint from the
-	// reserved range for every datagram, which is the default. It avoids
-	// depending on one constant a middlebox could be taught to match, while
-	// staying inside the range that makes the prelude work at all.
-	//
-	// RFC 9000, Section 15 reserves versions matching 0x?a?a?a?a "for use in
-	// forcing version negotiation to be exercised", and says a client "MAY use
-	// one of these version numbers with the expectation that the server will
-	// initiate version negotiation". Sending one is sanctioned client behavior,
-	// not a trick. The pattern is often called GREASE by analogy with TLS
-	// (RFC 8701), but the QUIC specification calls it reserved.
-	//
-	// The range is not cosmetic. Measurements for this package found that on a
-	// Russian path, preludes carrying a reserved codepoint succeeded 21 times
-	// out of 24, while codepoints outside any range an implementation would
-	// recognize, such as 0xdeadbeef or 0x12345678, succeeded 5 times out of 24
-	// against the same controls. A datagram whose version is not recognizable
-	// as QUIC appears to be ignored rather than acted on, leaving the real
-	// Initial to be the first QUIC packet the middlebox sees. Random bytes,
-	// which are not QUIC-shaped at all, likewise have no effect.
-	RandomVersion uint32 = 0
-
-	// ReservedVersion is one fixed codepoint from the reserved range. It is
-	// offered for callers who want a stable value; prefer [RandomVersion].
-	ReservedVersion uint32 = 0x1a2a3a4a
-
-	// reservedNibble is the low nibble every byte of a reserved codepoint
-	// carries.
-	reservedNibble = 0x0a
-
 	// MatchPacketLength asks a generator to size each datagram to match the
 	// packet it precedes, so the prelude is not distinguishable by size from the
 	// traffic it is mixed with. A packet whose length could not carry an Initial
@@ -123,6 +93,22 @@ const (
 	// maxProtectedLength is the largest payload a two-byte QUIC varint can
 	// describe.
 	maxProtectedLength = 1 << 14
+
+	// reservedNibble is the low nibble every byte of a reserved codepoint
+	// carries.
+	reservedNibble = 0x0a
+
+	// draftPrefix is the first three bytes of the codepoints the IETF drafts
+	// used, the last byte being the draft number.
+	draftPrefix uint32 = 0xff000000
+
+	// lastAssignedDraft is the highest draft number QUIC used: draft-34 became
+	// RFC 9000. Draft codepoints at or below it saw deployment, so they are the
+	// ones filtering recognizes, and [RandomDraftVersion] chooses above it.
+	//
+	// If the IETF ever assigns codepoints in this range again, this floor needs
+	// revisiting.
+	lastAssignedDraft = 34
 )
 
 // GeneratorInput describes the write a prelude is about to precede.
@@ -168,27 +154,85 @@ func Random(length int) (Generator, error) {
 	}, nil
 }
 
+// VersionSource chooses the version codepoint for a datagram. It is called once
+// per datagram, so a source that varies produces datagrams that differ on the
+// wire and gives a middlebox no single constant to match.
+type VersionSource func() (uint32, error)
+
+// FixedVersion returns a [VersionSource] that always yields version.
+func FixedVersion(version uint32) (VersionSource, error) {
+	if version == 0 {
+		return nil, fmt.Errorf("version must not be zero, which denotes Version Negotiation")
+	}
+	return func() (uint32, error) { return version, nil }, nil
+}
+
+// RandomReservedVersion returns a [VersionSource] yielding a fresh codepoint
+// from the range RFC 9000, Section 15 reserves "for use in forcing version
+// negotiation to be exercised", 0x?a?a?a?a. The same section says a client "MAY
+// use one of these version numbers with the expectation that the server will
+// initiate version negotiation", so sending one is sanctioned behavior.
+//
+// This is the default. The range holds 65536 values, none of which can collide
+// with an assigned version, since it is reserved.
+func RandomReservedVersion() VersionSource {
+	return func() (uint32, error) {
+		var b [4]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return 0, fmt.Errorf("choose reserved version: %w", err)
+		}
+		for i := range b {
+			b[i] = b[i]&0xf0 | reservedNibble
+		}
+		return binary.BigEndian.Uint32(b[:]), nil
+	}
+}
+
+// RandomDraftVersion returns a [VersionSource] yielding a fresh codepoint from
+// the range the IETF drafts used, 0xff0000xx, above the last draft number that
+// was ever assigned.
+//
+// The floor matters. Filtering recognizes the versions that saw deployment: on
+// the Iranian paths measured for this package, draft-29 is dropped outright
+// while an unassigned codepoint sharing its prefix passes, so that filter
+// matches an exact list rather than the prefix. Choosing above the assigned
+// drafts stays clear of the list while remaining in a range a middlebox still
+// recognizes as QUIC.
+//
+// This is an alternative to [RandomReservedVersion] for a path where the
+// reserved range is filtered. It is a smaller pool.
+func RandomDraftVersion() VersionSource {
+	return func() (uint32, error) {
+		var b [1]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return 0, fmt.Errorf("choose draft version: %w", err)
+		}
+		span := 0xff - lastAssignedDraft
+		return draftPrefix | uint32(lastAssignedDraft+1+int(b[0])%span), nil
+	}
+}
+
 // InvalidInitial returns a [Generator] producing datagrams with a syntactically
 // valid QUIC long header announcing an Initial packet, and random bytes beyond
 // it. The payload cannot be decrypted and the authentication tag will not
 // verify, so it is not a valid QUIC packet and no server acts on it.
 //
-// version is written to the wire as given. [RandomVersion], the default, picks
-// a fresh codepoint for every datagram. A codepoint no implementation speaks is
-// not recognized by filtering that enumerates known versions.
-func InvalidInitial(version uint32, length int) (Generator, error) {
+// The version must be one a middlebox recognizes as QUIC, or the datagram is
+// ignored and the prelude does nothing. See the package documentation for which
+// ranges were measured to work.
+func InvalidInitial(version VersionSource, length int) (Generator, error) {
+	if version == nil {
+		return nil, fmt.Errorf("version source must not be nil")
+	}
 	if length != MatchPacketLength {
 		if err := ValidateInitialLength(length); err != nil {
 			return nil, err
 		}
 	}
 	return func(input GeneratorInput) ([][]byte, error) {
-		chosen := version
-		if chosen == RandomVersion {
-			var err error
-			if chosen, err = newRandomVersion(); err != nil {
-				return nil, err
-			}
+		chosen, err := version()
+		if err != nil {
+			return nil, err
 		}
 		datagram, err := invalidInitial(chosen, lengthFor(length, input.Packet, DefaultLength))
 		if err != nil {
@@ -198,25 +242,16 @@ func InvalidInitial(version uint32, length int) (Generator, error) {
 	}, nil
 }
 
-// newRandomVersion returns a fresh codepoint from the reserved 0x?a?a?a?a
-// range. Every byte keeps the low nibble the range requires and takes a random
-// high nibble, giving 65536 values that no implementation speaks and that no
-// assigned version can collide with, since the range is reserved.
-func newRandomVersion() (uint32, error) {
-	var b [4]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return 0, fmt.Errorf("choose random version: %w", err)
-	}
-	for i := range b {
-		b[i] = b[i]&0xf0 | reservedNibble
-	}
-	return binary.BigEndian.Uint32(b[:]), nil
-}
-
 // isReservedVersion reports whether a codepoint lies in the reserved
 // 0x?a?a?a?a range.
 func isReservedVersion(version uint32) bool {
 	return version&0x0f0f0f0f == 0x0a0a0a0a
+}
+
+// isUnassignedDraftVersion reports whether a codepoint lies in the draft range
+// above the last assigned draft number.
+func isUnassignedDraftVersion(version uint32) bool {
+	return version&0xffffff00 == draftPrefix && version&0xff > lastAssignedDraft
 }
 
 // Repeat returns a [Generator] that calls generator count times and

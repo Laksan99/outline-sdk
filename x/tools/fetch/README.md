@@ -33,7 +33,7 @@ reach for first:
 | `count` | `1` | Number of datagrams; `0` disables the prelude |
 | `mode` | `invalid-initial` | Or `random`, which is useful as a control |
 | `length` | `match` | `match` sizes each datagram like the packet it precedes; or give a byte count |
-| `version` | `random` | A fresh codepoint per datagram from the reserved `0x?a?a?a?a` range; also `reserved`, `v1`, `v2`, or any hex value |
+| `version` | `reserved` | Range to draw a fresh codepoint from per datagram: `reserved` (`0x?a?a?a?a`) or `draft`; or a fixed `v1`, `v2`, or hex value |
 
 Because it is an ordinary transport, it stacks above a proxy, and the prelude
 then travels the same path as the traffic it precedes:

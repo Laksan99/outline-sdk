@@ -36,6 +36,18 @@ func requireLongHeader(t *testing.T, p []byte, length int) (version uint32, pack
 	return version, p[0] & 0x30
 }
 
+// exampleReserved is one codepoint from the reserved range, used where a test
+// needs a stable value.
+const exampleReserved uint32 = 0x1a2a3a4a
+
+// mustFixed builds a VersionSource that always yields version.
+func mustFixed(t *testing.T, version uint32) VersionSource {
+	t.Helper()
+	source, err := FixedVersion(version)
+	require.NoError(t, err)
+	return source
+}
+
 // generate calls a generator once with a placeholder packet and destination,
 // and requires it to return exactly one datagram.
 func generate(t *testing.T, generator Generator) []byte {
@@ -57,7 +69,7 @@ func generateFor(t *testing.T, generator Generator, packet []byte) [][]byte {
 }
 
 func TestInvalidInitialV1UsesInitialTypeBits(t *testing.T) {
-	generator, err := InvalidInitial(Version1, 1280)
+	generator, err := InvalidInitial(mustFixed(t, Version1), 1280)
 	require.NoError(t, err)
 
 	version, packetType := requireLongHeader(t, generate(t, generator), 1280)
@@ -67,7 +79,7 @@ func TestInvalidInitialV1UsesInitialTypeBits(t *testing.T) {
 }
 
 func TestInvalidInitialV2UsesInitialTypeBits(t *testing.T) {
-	generator, err := InvalidInitial(Version2, 1280)
+	generator, err := InvalidInitial(mustFixed(t, Version2), 1280)
 	require.NoError(t, err)
 
 	version, packetType := requireLongHeader(t, generate(t, generator), 1280)
@@ -80,14 +92,14 @@ func TestInvalidInitialV2UsesInitialTypeBits(t *testing.T) {
 func TestInvalidInitialUnknownVersionUsesV1Layout(t *testing.T) {
 	// RFC 8999 defines only the header form and version field for a version the
 	// reader does not know, so anything else falls back to the v1 layout.
-	generator, err := InvalidInitial(ReservedVersion, 1280)
+	generator, err := InvalidInitial(mustFixed(t, exampleReserved), 1280)
 	require.NoError(t, err)
 
 	version, packetType := requireLongHeader(t, generate(t, generator), 1280)
-	require.Equal(t, ReservedVersion, version)
+	require.Equal(t, exampleReserved, version)
 	require.Equal(t, byte(0x00), packetType)
 
-	generator, err = InvalidInitial(0xdeadbeef, 1280)
+	generator, err = InvalidInitial(mustFixed(t, 0xdeadbeef), 1280)
 	require.NoError(t, err)
 
 	version, packetType = requireLongHeader(t, generate(t, generator), 1280)
@@ -96,21 +108,25 @@ func TestInvalidInitialUnknownVersionUsesV1Layout(t *testing.T) {
 }
 
 func TestInvalidInitialRejectsBadArguments(t *testing.T) {
+	// A nil source cannot produce a version.
+	_, err0 := InvalidInitial(nil, 1280)
+	require.Error(t, err0)
+
 	// RFC 9000 requires a client Initial to travel in a datagram of at least
 	// MinimumInitialLength bytes.
-	_, err := InvalidInitial(Version1, MinimumInitialLength-1)
+	_, err := InvalidInitial(mustFixed(t, Version1), MinimumInitialLength-1)
 	require.Error(t, err)
 
 	// The length field is written as a two-byte varint, which caps the payload.
-	_, err = InvalidInitial(Version1, headerLength+maxProtectedLength)
+	_, err = InvalidInitial(mustFixed(t, Version1), headerLength+maxProtectedLength)
 	require.Error(t, err)
 }
 
 func TestInvalidInitialAcceptsBoundaryLengths(t *testing.T) {
-	_, err := InvalidInitial(Version1, MinimumInitialLength)
+	_, err := InvalidInitial(mustFixed(t, Version1), MinimumInitialLength)
 	require.NoError(t, err)
 
-	_, err = InvalidInitial(Version1, headerLength+maxProtectedLength-1)
+	_, err = InvalidInitial(mustFixed(t, Version1), headerLength+maxProtectedLength-1)
 	require.NoError(t, err)
 }
 
@@ -122,7 +138,7 @@ func TestValidateInitialLength(t *testing.T) {
 }
 
 func TestDatagramsDifferBetweenCalls(t *testing.T) {
-	generator, err := InvalidInitial(ReservedVersion, DefaultLength)
+	generator, err := InvalidInitial(mustFixed(t, exampleReserved), DefaultLength)
 	require.NoError(t, err)
 
 	first := generate(t, generator)
@@ -157,7 +173,7 @@ func TestRandomRejectsNegativeLength(t *testing.T) {
 }
 
 func TestInvalidInitialMatchesPacketLength(t *testing.T) {
-	generator, err := InvalidInitial(ReservedVersion, MatchPacketLength)
+	generator, err := InvalidInitial(mustFixed(t, exampleReserved), MatchPacketLength)
 	require.NoError(t, err)
 
 	// A prelude sized like the packet it precedes is not separable by size.
@@ -170,7 +186,7 @@ func TestInvalidInitialMatchesPacketLength(t *testing.T) {
 }
 
 func TestInvalidInitialFallsBackWhenPacketCannotCarryAnInitial(t *testing.T) {
-	generator, err := InvalidInitial(ReservedVersion, MatchPacketLength)
+	generator, err := InvalidInitial(mustFixed(t, exampleReserved), MatchPacketLength)
 	require.NoError(t, err)
 
 	// A short packet, such as a DNS query, is not a length an Initial can have,
@@ -190,7 +206,7 @@ func TestRandomMatchesPacketLength(t *testing.T) {
 }
 
 func TestRepeatConcatenatesDatagrams(t *testing.T) {
-	inner, err := InvalidInitial(Version1, 1280)
+	inner, err := InvalidInitial(mustFixed(t, Version1), 1280)
 	require.NoError(t, err)
 	generator, err := Repeat(3, inner)
 	require.NoError(t, err)
@@ -203,7 +219,7 @@ func TestRepeatConcatenatesDatagrams(t *testing.T) {
 }
 
 func TestRepeatZeroDisablesThePrelude(t *testing.T) {
-	inner, err := InvalidInitial(Version1, 1280)
+	inner, err := InvalidInitial(mustFixed(t, Version1), 1280)
 	require.NoError(t, err)
 	generator, err := Repeat(0, inner)
 	require.NoError(t, err)
@@ -212,7 +228,7 @@ func TestRepeatZeroDisablesThePrelude(t *testing.T) {
 }
 
 func TestRepeatRejectsBadArguments(t *testing.T) {
-	inner, err := InvalidInitial(Version1, 1280)
+	inner, err := InvalidInitial(mustFixed(t, Version1), 1280)
 	require.NoError(t, err)
 
 	_, err = Repeat(-1, inner)
@@ -256,7 +272,7 @@ func TestNewConfigDefaults(t *testing.T) {
 }
 
 func TestRandomVersionVariesButStaysReserved(t *testing.T) {
-	generator, err := InvalidInitial(RandomVersion, 1280)
+	generator, err := InvalidInitial(RandomReservedVersion(), 1280)
 	require.NoError(t, err)
 
 	seen := map[uint32]int{}
@@ -274,8 +290,8 @@ func TestRandomVersionVariesButStaysReserved(t *testing.T) {
 	require.Greater(t, len(seen), 200, "versions should almost all differ")
 }
 
-func TestIsReservedVersion(t *testing.T) {
-	require.True(t, isReservedVersion(ReservedVersion))
+func TestIsexampleReserved(t *testing.T) {
+	require.True(t, isReservedVersion(exampleReserved))
 	require.True(t, isReservedVersion(0x0a0a0a0a))
 	require.True(t, isReservedVersion(0xfafafafa))
 
@@ -286,12 +302,46 @@ func TestIsReservedVersion(t *testing.T) {
 }
 
 func TestExplicitVersionIsStable(t *testing.T) {
-	generator, err := InvalidInitial(ReservedVersion, 1280)
+	generator, err := InvalidInitial(mustFixed(t, exampleReserved), 1280)
 	require.NoError(t, err)
 
 	// An explicitly chosen codepoint must be used verbatim, every time.
 	for range 8 {
 		version, _ := requireLongHeader(t, generate(t, generator), 1280)
-		require.Equal(t, ReservedVersion, version)
+		require.Equal(t, exampleReserved, version)
 	}
+}
+
+func TestFixedVersionRejectsZero(t *testing.T) {
+	// Zero denotes Version Negotiation, which a client never sends.
+	_, err := FixedVersion(0)
+	require.Error(t, err)
+}
+
+func TestRandomDraftVersionStaysAboveAssignedDrafts(t *testing.T) {
+	source := RandomDraftVersion()
+
+	seen := map[uint32]int{}
+	for range 512 {
+		version, err := source()
+		require.NoError(t, err)
+		require.Equal(t, draftPrefix, version&0xffffff00, "%#08x is outside the draft range", version)
+		// draft-34 became RFC 9000. At or below it the codepoints saw
+		// deployment, which is what filtering recognizes: the Iranian paths
+		// measured for this package drop draft-29 outright.
+		require.Greater(t, version&0xff, uint32(lastAssignedDraft), "%#08x is an assigned draft", version)
+		require.True(t, isUnassignedDraftVersion(version))
+		seen[version]++
+	}
+	require.Greater(t, len(seen), 100, "draft codepoints should vary")
+}
+
+func TestIsUnassignedDraftVersion(t *testing.T) {
+	require.True(t, isUnassignedDraftVersion(0xff0000fe))
+	require.True(t, isUnassignedDraftVersion(0xff000023), "draft-35, never assigned")
+
+	require.False(t, isUnassignedDraftVersion(0xff00001d), "draft-29")
+	require.False(t, isUnassignedDraftVersion(0xff000022), "draft-34, became RFC 9000")
+	require.False(t, isUnassignedDraftVersion(exampleReserved))
+	require.False(t, isUnassignedDraftVersion(Version1))
 }

@@ -174,7 +174,9 @@ func TestQUICPreludeOptionLength(t *testing.T) {
 }
 
 func TestQUICPreludeOptionVersionNames(t *testing.T) {
-	require.Equal(t, quicprelude.GreasedVersion, versionOf(preludesFor(t, "version=greased")[0]))
+	require.Equal(t, quicprelude.ReservedVersion, versionOf(preludesFor(t, "version=reserved")[0]))
+	// "greased" is the widely used name for the same range.
+	require.Equal(t, quicprelude.ReservedVersion, versionOf(preludesFor(t, "version=greased")[0]))
 
 	// "random" is the default and can be written explicitly.
 	first := versionOf(preludesFor(t, "version=random")[0])

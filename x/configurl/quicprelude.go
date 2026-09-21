@@ -125,14 +125,16 @@ func parseQUICPreludeLength(value string) (int, error) {
 }
 
 // parseQUICVersionCodepoint accepts "random", the default, which chooses a
-// fresh codepoint per datagram; "greased" for the reserved 0x?a?a?a?a pattern;
-// the names "v1" and "v2"; or a 32-bit hex codepoint.
+// fresh codepoint per datagram from the reserved range; "reserved" for a fixed
+// codepoint from it; the names "v1" and "v2"; or a 32-bit hex codepoint.
+// "greased" is accepted as a synonym for "reserved", since the pattern is
+// widely called that by analogy with TLS, though RFC 9000 calls it reserved.
 func parseQUICVersionCodepoint(value string) (uint32, error) {
 	switch strings.ToLower(value) {
 	case "random":
 		return quicprelude.RandomVersion, nil
-	case "greased":
-		return quicprelude.GreasedVersion, nil
+	case "reserved", "greased":
+		return quicprelude.ReservedVersion, nil
 	case "v1":
 		return quicprelude.Version1, nil
 	case "v2":
@@ -141,7 +143,7 @@ func parseQUICVersionCodepoint(value string) (uint32, error) {
 	trimmed := strings.TrimPrefix(strings.TrimPrefix(value, "0x"), "0X")
 	v, err := strconv.ParseUint(trimmed, 16, 32)
 	if err != nil {
-		return 0, fmt.Errorf("invalid version %q: want \"random\", \"greased\", v1, v2, or a 32-bit hex codepoint", value)
+		return 0, fmt.Errorf("invalid version %q: want \"random\", \"reserved\", v1, v2, or a 32-bit hex codepoint", value)
 	}
 	if v == 0 {
 		return 0, fmt.Errorf("invalid version 0x0, which denotes Version Negotiation: use \"random\" for a fresh codepoint per datagram")

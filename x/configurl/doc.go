@@ -71,11 +71,12 @@ For h2connect, plain=true enables h2c (cleartext HTTP/2 without TLS).
 Proxy authentication is supported in two ways:
 
   - URL userinfo (user:password@host) generates a Proxy-Authorization: Basic header.
+
   - For other schemes such as Bearer the auth parameter sets the Proxy-Authorization header value directly.
 
-	httpconnect://[USER:PASS@][HOST]:[PORT][?sni=SNI][&certname=CERTNAME][&auth=TOKEN]
-	h2connect://[USER:PASS@][HOST]:[PORT][?sni=SNI][&certname=CERTNAME][&auth=TOKEN][&plain=true]
-	h3connect://[USER:PASS@][HOST]:[PORT][?sni=SNI][&certname=CERTNAME][&auth=TOKEN]
+    httpconnect://[USER:PASS@][HOST]:[PORT][?sni=SNI][&certname=CERTNAME][&auth=TOKEN]
+    h2connect://[USER:PASS@][HOST]:[PORT][?sni=SNI][&certname=CERTNAME][&auth=TOKEN][&plain=true]
+    h3connect://[USER:PASS@][HOST]:[PORT][?sni=SNI][&certname=CERTNAME][&auth=TOKEN]
 
 # Transports
 
@@ -150,16 +151,17 @@ match the packet it precedes.
 	count    number of datagrams; 0 disables the prelude (default 1)
 	mode     invalid-initial or random (default invalid-initial)
 	length   match, or a byte count (default match)
-	version  random, greased, v1, v2, or a 32-bit hex codepoint (default random)
+	version  random, reserved, v1, v2, or a 32-bit hex codepoint (default random)
 
 length=match sizes each datagram like the packet it precedes, so the prelude is
 not separable from it by size. A packet too short to carry an Initial falls back
 to a valid length.
 
-version=random chooses a fresh codepoint from the reserved 0x?a?a?a?a range for
-every datagram, so no single constant identifies the prelude. The range matters:
-measurements found codepoints outside it are largely ignored rather than acted
-on, which defeats the technique.
+version=random chooses a fresh codepoint from the range RFC 9000 reserves for
+forcing version negotiation, 0x?a?a?a?a, for every datagram, so no single
+constant identifies the prelude. The range matters: measurements found that a
+codepoint no implementation would recognize is ignored rather than acted on,
+which defeats the technique.
 
 Packet reordering (streams only, package [golang.getoutline.org/sdk/x/disorder])
 

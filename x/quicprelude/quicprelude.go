@@ -41,6 +41,19 @@
 // carry a long header with a plausible version and connection IDs, and random
 // bytes where the protected payload and authentication tag would be. A QUIC
 // server discards them.
+//
+// The version must be one a middlebox recognizes as QUIC, or the datagram is
+// ignored and the technique does nothing. Measurements for this package found
+// the following, each against positive and negative controls:
+//
+//   - reserved 0x?a?a?a?a: effective on both paths measured, and the default
+//   - draft codepoints 0xff0000xx: effective, except that an assigned one such
+//     as draft-29 is dropped outright on the Iranian paths, which filter an
+//     exact list of the versions in use
+//   - QUIC v2: effective on both, but a single fixed value
+//   - 0x0000xxxx, reserved for future IETF documents: largely ineffective, no
+//     implementation uses it
+//   - anything else: ineffective
 package quicprelude
 
 import (
@@ -61,27 +74,34 @@ const (
 	DefaultLength = 1280
 
 	// RandomVersion asks a generator to choose a fresh codepoint from the
-	// reserved 0x?a?a?a?a range for every datagram, which is the default. It
-	// avoids depending on one constant a middlebox could be taught to match,
-	// while staying inside the range that makes the prelude work at all.
+	// reserved range for every datagram, which is the default. It avoids
+	// depending on one constant a middlebox could be taught to match, while
+	// staying inside the range that makes the prelude work at all.
+	//
+	// RFC 9000, Section 15 reserves versions matching 0x?a?a?a?a "for use in
+	// forcing version negotiation to be exercised", and says a client "MAY use
+	// one of these version numbers with the expectation that the server will
+	// initiate version negotiation". Sending one is sanctioned client behavior,
+	// not a trick. The pattern is often called GREASE by analogy with TLS
+	// (RFC 8701), but the QUIC specification calls it reserved.
 	//
 	// The range is not cosmetic. Measurements for this package found that on a
 	// Russian path, preludes carrying a reserved codepoint succeeded 21 times
-	// out of 24, while codepoints outside it, such as 0xdeadbeef or 0x12345678,
-	// succeeded 5 times out of 24 against the same controls. A datagram whose
-	// version is not recognizable as QUIC appears to be ignored rather than
-	// acted on, which leaves the real Initial to be the first QUIC packet the
-	// middlebox sees. Random bytes, which are not QUIC-shaped at all, likewise
-	// have no effect.
+	// out of 24, while codepoints outside any range an implementation would
+	// recognize, such as 0xdeadbeef or 0x12345678, succeeded 5 times out of 24
+	// against the same controls. A datagram whose version is not recognizable
+	// as QUIC appears to be ignored rather than acted on, leaving the real
+	// Initial to be the first QUIC packet the middlebox sees. Random bytes,
+	// which are not QUIC-shaped at all, likewise have no effect.
 	RandomVersion uint32 = 0
 
-	// GreasedVersion is one fixed codepoint from the reserved 0x?a?a?a?a range
-	// RFC 9000 sets aside to exercise version negotiation. It is offered for
-	// callers who want a stable value; prefer [RandomVersion].
-	GreasedVersion uint32 = 0x1a2a3a4a
+	// ReservedVersion is one fixed codepoint from the reserved range. It is
+	// offered for callers who want a stable value; prefer [RandomVersion].
+	ReservedVersion uint32 = 0x1a2a3a4a
 
-	// greasedMask is the low nibble every byte of a reserved codepoint carries.
-	greasedMask = 0x0a
+	// reservedNibble is the low nibble every byte of a reserved codepoint
+	// carries.
+	reservedNibble = 0x0a
 
 	// MatchPacketLength asks a generator to size each datagram to match the
 	// packet it precedes, so the prelude is not distinguishable by size from the
@@ -188,7 +208,7 @@ func newRandomVersion() (uint32, error) {
 		return 0, fmt.Errorf("choose random version: %w", err)
 	}
 	for i := range b {
-		b[i] = b[i]&0xf0 | greasedMask
+		b[i] = b[i]&0xf0 | reservedNibble
 	}
 	return binary.BigEndian.Uint32(b[:]), nil
 }

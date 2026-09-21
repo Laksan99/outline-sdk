@@ -80,11 +80,11 @@ func TestInvalidInitialV2UsesInitialTypeBits(t *testing.T) {
 func TestInvalidInitialUnknownVersionUsesV1Layout(t *testing.T) {
 	// RFC 8999 defines only the header form and version field for a version the
 	// reader does not know, so anything else falls back to the v1 layout.
-	generator, err := InvalidInitial(GreasedVersion, 1280)
+	generator, err := InvalidInitial(ReservedVersion, 1280)
 	require.NoError(t, err)
 
 	version, packetType := requireLongHeader(t, generate(t, generator), 1280)
-	require.Equal(t, GreasedVersion, version)
+	require.Equal(t, ReservedVersion, version)
 	require.Equal(t, byte(0x00), packetType)
 
 	generator, err = InvalidInitial(0xdeadbeef, 1280)
@@ -122,7 +122,7 @@ func TestValidateInitialLength(t *testing.T) {
 }
 
 func TestDatagramsDifferBetweenCalls(t *testing.T) {
-	generator, err := InvalidInitial(GreasedVersion, DefaultLength)
+	generator, err := InvalidInitial(ReservedVersion, DefaultLength)
 	require.NoError(t, err)
 
 	first := generate(t, generator)
@@ -157,7 +157,7 @@ func TestRandomRejectsNegativeLength(t *testing.T) {
 }
 
 func TestInvalidInitialMatchesPacketLength(t *testing.T) {
-	generator, err := InvalidInitial(GreasedVersion, MatchPacketLength)
+	generator, err := InvalidInitial(ReservedVersion, MatchPacketLength)
 	require.NoError(t, err)
 
 	// A prelude sized like the packet it precedes is not separable by size.
@@ -170,7 +170,7 @@ func TestInvalidInitialMatchesPacketLength(t *testing.T) {
 }
 
 func TestInvalidInitialFallsBackWhenPacketCannotCarryAnInitial(t *testing.T) {
-	generator, err := InvalidInitial(GreasedVersion, MatchPacketLength)
+	generator, err := InvalidInitial(ReservedVersion, MatchPacketLength)
 	require.NoError(t, err)
 
 	// A short packet, such as a DNS query, is not a length an Initial can have,
@@ -275,7 +275,7 @@ func TestRandomVersionVariesButStaysReserved(t *testing.T) {
 }
 
 func TestIsReservedVersion(t *testing.T) {
-	require.True(t, isReservedVersion(GreasedVersion))
+	require.True(t, isReservedVersion(ReservedVersion))
 	require.True(t, isReservedVersion(0x0a0a0a0a))
 	require.True(t, isReservedVersion(0xfafafafa))
 
@@ -286,12 +286,12 @@ func TestIsReservedVersion(t *testing.T) {
 }
 
 func TestExplicitVersionIsStable(t *testing.T) {
-	generator, err := InvalidInitial(GreasedVersion, 1280)
+	generator, err := InvalidInitial(ReservedVersion, 1280)
 	require.NoError(t, err)
 
 	// An explicitly chosen codepoint must be used verbatim, every time.
 	for range 8 {
 		version, _ := requireLongHeader(t, generate(t, generator), 1280)
-		require.Equal(t, GreasedVersion, version)
+		require.Equal(t, ReservedVersion, version)
 	}
 }

@@ -90,7 +90,7 @@ func (l *fixedListener) ListenPacket(context.Context) (net.PacketConn, error) {
 // mustDefaultGenerator returns the generator NewConfig uses.
 func mustDefaultGenerator(t *testing.T) Generator {
 	t.Helper()
-	generator, err := InvalidInitial(DefaultVersion, MatchPacketLength)
+	generator, err := InvalidInitial(GreasedVersion, MatchPacketLength)
 	require.NoError(t, err)
 	return generator
 }

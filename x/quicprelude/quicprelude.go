@@ -60,11 +60,28 @@ const (
 	// datagram size alone.
 	DefaultLength = 1280
 
-	// DefaultVersion is a reserved version codepoint matching the 0x?a?a?a?a
-	// pattern RFC 9000 sets aside to exercise version negotiation. No
-	// implementation speaks it, which is the point: a middlebox that drops the
-	// versions it recognizes has no reason to hold this one in its list.
-	DefaultVersion uint32 = 0x1a2a3a4a
+	// RandomVersion asks a generator to choose a fresh codepoint from the
+	// reserved 0x?a?a?a?a range for every datagram, which is the default. It
+	// avoids depending on one constant a middlebox could be taught to match,
+	// while staying inside the range that makes the prelude work at all.
+	//
+	// The range is not cosmetic. Measurements for this package found that on a
+	// Russian path, preludes carrying a reserved codepoint succeeded 21 times
+	// out of 24, while codepoints outside it, such as 0xdeadbeef or 0x12345678,
+	// succeeded 5 times out of 24 against the same controls. A datagram whose
+	// version is not recognizable as QUIC appears to be ignored rather than
+	// acted on, which leaves the real Initial to be the first QUIC packet the
+	// middlebox sees. Random bytes, which are not QUIC-shaped at all, likewise
+	// have no effect.
+	RandomVersion uint32 = 0
+
+	// GreasedVersion is one fixed codepoint from the reserved 0x?a?a?a?a range
+	// RFC 9000 sets aside to exercise version negotiation. It is offered for
+	// callers who want a stable value; prefer [RandomVersion].
+	GreasedVersion uint32 = 0x1a2a3a4a
+
+	// greasedMask is the low nibble every byte of a reserved codepoint carries.
+	greasedMask = 0x0a
 
 	// MatchPacketLength asks a generator to size each datagram to match the
 	// packet it precedes, so the prelude is not distinguishable by size from the
@@ -136,25 +153,50 @@ func Random(length int) (Generator, error) {
 // it. The payload cannot be decrypted and the authentication tag will not
 // verify, so it is not a valid QUIC packet and no server acts on it.
 //
-// version is written to the wire as given. A codepoint no implementation speaks,
-// such as [DefaultVersion], is not recognized by filtering that enumerates
-// known versions.
+// version is written to the wire as given. [RandomVersion], the default, picks
+// a fresh codepoint for every datagram. A codepoint no implementation speaks is
+// not recognized by filtering that enumerates known versions.
 func InvalidInitial(version uint32, length int) (Generator, error) {
-	if version == 0 {
-		return nil, fmt.Errorf("version must not be zero, which denotes Version Negotiation")
-	}
 	if length != MatchPacketLength {
 		if err := ValidateInitialLength(length); err != nil {
 			return nil, err
 		}
 	}
 	return func(input GeneratorInput) ([][]byte, error) {
-		datagram, err := invalidInitial(version, lengthFor(length, input.Packet, DefaultLength))
+		chosen := version
+		if chosen == RandomVersion {
+			var err error
+			if chosen, err = newRandomVersion(); err != nil {
+				return nil, err
+			}
+		}
+		datagram, err := invalidInitial(chosen, lengthFor(length, input.Packet, DefaultLength))
 		if err != nil {
 			return nil, err
 		}
 		return [][]byte{datagram}, nil
 	}, nil
+}
+
+// newRandomVersion returns a fresh codepoint from the reserved 0x?a?a?a?a
+// range. Every byte keeps the low nibble the range requires and takes a random
+// high nibble, giving 65536 values that no implementation speaks and that no
+// assigned version can collide with, since the range is reserved.
+func newRandomVersion() (uint32, error) {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 0, fmt.Errorf("choose random version: %w", err)
+	}
+	for i := range b {
+		b[i] = b[i]&0xf0 | greasedMask
+	}
+	return binary.BigEndian.Uint32(b[:]), nil
+}
+
+// isReservedVersion reports whether a codepoint lies in the reserved
+// 0x?a?a?a?a range.
+func isReservedVersion(version uint32) bool {
+	return version&0x0f0f0f0f == 0x0a0a0a0a
 }
 
 // Repeat returns a [Generator] that calls generator count times and

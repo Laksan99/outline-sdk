@@ -40,13 +40,14 @@ type Config struct {
 	generator Generator
 }
 
-// NewConfig returns a Config that sends one Initial-shaped datagram carrying
-// [DefaultVersion], sized to match the packet it precedes. It never fails;
-// problems with the configuration surface in [Config.NewPacketListener].
+// NewConfig returns a Config that sends one Initial-shaped datagram, sized to
+// match the packet it precedes and carrying a freshly chosen version codepoint.
+// It never fails; problems with the configuration surface in
+// [Config.NewPacketListener].
 func NewConfig() *Config {
 	// The default arguments are constants known to be valid, so the error
 	// cannot occur.
-	generator, err := InvalidInitial(DefaultVersion, MatchPacketLength)
+	generator, err := InvalidInitial(RandomVersion, MatchPacketLength)
 	if err != nil {
 		panic("quicprelude: default generator is invalid: " + err.Error())
 	}

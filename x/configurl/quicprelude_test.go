@@ -117,7 +117,12 @@ func TestQUICPreludeDefaults(t *testing.T) {
 
 	require.Len(t, preludes, 1)
 	require.Len(t, preludes[0], len(payload))
-	require.Equal(t, quicprelude.DefaultVersion, versionOf(preludes[0]))
+
+	// The default codepoint is chosen per datagram rather than fixed, so a
+	// middlebox has no constant to match.
+	first := versionOf(preludes[0])
+	second := versionOf(preludesForPacket(t, "", payload)[0])
+	require.NotEqual(t, first, second, "default version should not repeat")
 
 	// A packet too short to be an Initial falls back to a valid length.
 	preludes = preludesForPacket(t, "", make([]byte, 40))
@@ -168,6 +173,18 @@ func TestQUICPreludeOptionLength(t *testing.T) {
 	require.Error(t, errorFor(t, "length=-1"))
 }
 
+func TestQUICPreludeOptionVersionNames(t *testing.T) {
+	require.Equal(t, quicprelude.GreasedVersion, versionOf(preludesFor(t, "version=greased")[0]))
+
+	// "random" is the default and can be written explicitly.
+	first := versionOf(preludesFor(t, "version=random")[0])
+	second := versionOf(preludesFor(t, "version=random")[0])
+	require.NotEqual(t, first, second)
+
+	// Zero is not a spelling of "random"; it denotes Version Negotiation.
+	require.Error(t, errorFor(t, "version=0x0"))
+}
+
 func TestQUICPreludeOptionVersion(t *testing.T) {
 	require.Equal(t, uint32(0xdeadbeef), versionOf(preludesFor(t, "version=0xdeadbeef")[0]))
 
@@ -181,8 +198,6 @@ func TestQUICPreludeOptionVersion(t *testing.T) {
 	// v2 encodes Initial as 0b01, so the type bits must differ from v1's.
 	require.Equal(t, byte(0x10), v2[0]&0x30)
 
-	// Version zero denotes Version Negotiation and is not a prelude version.
-	require.Error(t, errorFor(t, "version=0x0"))
 	require.Error(t, errorFor(t, "version=zzz"))
 }
 

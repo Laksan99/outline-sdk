@@ -150,14 +150,16 @@ match the packet it precedes.
 	count    number of datagrams; 0 disables the prelude (default 1)
 	mode     invalid-initial or random (default invalid-initial)
 	length   match, or a byte count (default match)
-	version  a 32-bit hex codepoint, v1, or v2 (default 0x1a2a3a4a)
+	version  random, greased, v1, v2, or a 32-bit hex codepoint (default random)
 
 length=match sizes each datagram like the packet it precedes, so the prelude is
 not separable from it by size. A packet too short to carry an Initial falls back
 to a valid length.
 
-version defaults to a reserved codepoint that no implementation speaks, which
-filtering that enumerates known versions has no reason to list.
+version=random chooses a fresh codepoint from the reserved 0x?a?a?a?a range for
+every datagram, so no single constant identifies the prelude. The range matters:
+measurements found codepoints outside it are largely ignored rather than acted
+on, which defeats the technique.
 
 Packet reordering (streams only, package [golang.getoutline.org/sdk/x/disorder])
 

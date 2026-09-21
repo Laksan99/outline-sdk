@@ -53,7 +53,7 @@ func newQUICPreludeConfigFromURL(configURL url.URL) (*quicprelude.Config, error)
 		count:   1,
 		mode:    "invalid-initial",
 		length:  quicprelude.MatchPacketLength,
-		version: quicprelude.DefaultVersion,
+		version: quicprelude.RandomVersion,
 	}
 
 	values, err := url.ParseQuery(configURL.Opaque)
@@ -124,10 +124,15 @@ func parseQUICPreludeLength(value string) (int, error) {
 	return length, nil
 }
 
-// parseQUICVersionCodepoint accepts a 32-bit wire codepoint, in hexadecimal
-// with an optional 0x prefix, or the names "v1" and "v2".
+// parseQUICVersionCodepoint accepts "random", the default, which chooses a
+// fresh codepoint per datagram; "greased" for the reserved 0x?a?a?a?a pattern;
+// the names "v1" and "v2"; or a 32-bit hex codepoint.
 func parseQUICVersionCodepoint(value string) (uint32, error) {
 	switch strings.ToLower(value) {
+	case "random":
+		return quicprelude.RandomVersion, nil
+	case "greased":
+		return quicprelude.GreasedVersion, nil
 	case "v1":
 		return quicprelude.Version1, nil
 	case "v2":
@@ -136,7 +141,10 @@ func parseQUICVersionCodepoint(value string) (uint32, error) {
 	trimmed := strings.TrimPrefix(strings.TrimPrefix(value, "0x"), "0X")
 	v, err := strconv.ParseUint(trimmed, 16, 32)
 	if err != nil {
-		return 0, fmt.Errorf("invalid version %q: want a 32-bit hex codepoint such as 0x1a2a3a4a, or v1 or v2", value)
+		return 0, fmt.Errorf("invalid version %q: want \"random\", \"greased\", v1, v2, or a 32-bit hex codepoint", value)
+	}
+	if v == 0 {
+		return 0, fmt.Errorf("invalid version 0x0, which denotes Version Negotiation: use \"random\" for a fresh codepoint per datagram")
 	}
 	return uint32(v), nil
 }

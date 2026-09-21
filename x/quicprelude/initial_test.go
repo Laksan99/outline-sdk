@@ -92,7 +92,6 @@ func TestMayCarryClientHello(t *testing.T) {
 		{"v2 Initial coalesced with 0-RTT", coalesce(longPacket(v2Initial, Version2, 1100), longPacket(v2ZeroRTT, Version2, 100)), true},
 		{"Initial followed by another version's Handshake", coalesce(longPacket(v1Initial, Version1, 1100), longPacket(v2Handshake, Version2, 100)), true},
 		{"Initial with a Fixed Bit greased to zero", longPacket(0x80, Version1, 1200), true},
-		{"Initial whose length overruns the datagram", longPacket(v1Initial, Version1, 1500)[:1250], true},
 
 		// Initials that only acknowledge the server's, coalesced with Handshake.
 		{"v1 Initial coalesced with Handshake", coalesce(longPacket(v1Initial, Version1, 100), longPacket(v1Handshake, Version1, 1100)), false},
@@ -102,6 +101,10 @@ func TestMayCarryClientHello(t *testing.T) {
 		{"v1 Initial one byte short", clientInitial(MinimumInitialLength - 1), false},
 		{"Initial truncated inside its header", clientInitial(1200)[:10], false},
 		{"DNS query that reads as a draft Initial", dnsQuery(0x80ff, 0x0000), false},
+
+		// Initials whose header does not parse, which no server could process.
+		{"Initial whose length overruns the datagram", longPacket(v1Initial, Version1, 1500)[:1250], false},
+		{"Initial whose token overruns the datagram", append([]byte{v1Initial, 0, 0, 0, 1, 0, 0, 0x7f, 0xff}, make([]byte, 1200)...), false},
 
 		// Everything else.
 		{"empty", nil, false},

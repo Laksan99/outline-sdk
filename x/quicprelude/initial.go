@@ -48,8 +48,12 @@ const (
 // Initial, which therefore gets a prelude it does not need: one extra datagram
 // per handshake. With Go 1.25's default post-quantum key share the ClientHello
 // also spans two Initials, so a handshake sends three preludes, two of them
-// useful. Past the length check below, the rule errs only in that direction: an
-// Initial whose header does not parse is preluded, never skipped.
+// useful. For an Initial that parses, the rule errs only in that direction.
+//
+// An Initial whose header does not parse is skipped. Its lengths point past the
+// end of the datagram, which no QUIC stack sends and no server can process, so
+// no handshake follows it and a prelude would protect nothing. Datagrams that
+// merely look like a long header, without being QUIC, usually fail here too.
 //
 // Datagrams shorter than [MinimumInitialLength] are skipped first. RFC 9000
 // section 14.1 requires a client to pad every datagram carrying an Initial to
@@ -78,7 +82,10 @@ func mayCarryClientHello(p []byte) bool {
 		return false
 	}
 	end, ok := longPacketEnd(p)
-	if !ok || end >= len(p) {
+	if !ok {
+		return false
+	}
+	if end == len(p) {
 		return true
 	}
 	next := p[end:]
